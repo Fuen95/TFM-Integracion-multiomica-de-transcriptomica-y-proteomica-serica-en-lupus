@@ -1,0 +1,1478 @@
+---
+title: "Integración multi-ómica de la firma de interferón y biomarcadores séricos en LES"
+subtitle: "Modelo predictivo LASSO · Regresión logística penalizada con validación cruzada"
+author: "Fuensanta Bernal Gómez"
+date: "`r format(Sys.Date(), '%d de %B de %Y')`"
+output:
+  html_document:
+    self_contained: true
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    toc_depth: 3
+    number_sections: true
+    css: estilos.css
+    theme: flatly
+    highlight: tango
+    df_print: paged
+    code_folding: show
+    fig_width: 8
+    fig_height: 5
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.path = "figuras/LASSO/",
+  dev      = "png",
+  dpi      = 300,
+  fig.width  = 8,
+  fig.height = 5,
+  fig.align  = "center",
+  bg    = "white",
+  cache = FALSE
+)
+ruta_fig <- knitr::opts_chunk$get("fig.path")
+dir.create(ruta_fig, showWarnings = FALSE, recursive = TRUE)
+```
+
+---
+
+# Introducción
+
+En este documento se presenta la construcción y validación de un **modelo predictivo de actividad clínica** en pacientes con lupus eritematoso sistémico (LES) mediante **regresión logística penalizada LASSO** (*Least Absolute Shrinkage and Selection Operator*), implementado con el paquete `glmnet` de R [@Friedman2010; @Tibshirani1996].
+
+El modelo LASSO se aplica de forma independiente para cada uno de los **cinco desenlaces clínicos** evaluados en el análisis DIABLO previo:
+
+- **Remisión SLEDAI-2K**: SLEDAI-2K = 0 (remisión) vs. SLEDAI-2K ≥ 1 (actividad) [@Gladman2002].
+- **Remisión SLE-DAS**: SLE-DAS < 2,08 (remisión) vs. SLE-DAS ≥ 2,08 (no remisión) [@Zen2016].
+- **Daño acumulado SLICC-SDI**: SDI = 0 (sin daño) vs. SDI ≥ 1 (con daño) [@Gladman1996].
+- **Remisión DORIS**: cumple vs. no cumple criterios DORIS [@vanVollenhoven2017].
+- **Remisión estricta compuesta**: cumplimiento simultáneo de SLEDAI-2K = 0, SLE-DAS < 2,08 y SLICC-SDI = 0.
+
+La **variable respuesta Y** se adapta en cada sección a la definición clínica correspondiente. Los predictores incluyen las **dos capas ómicas** integradas en el análisis DIABLO: el bloque transcriptómico (72 ISGs del panel NanoString nCounter, escala log2 normalizada) y el bloque proteómico sérico (18 variables tras exclusión de las variables con >70% de datos faltantes, transformadas a log2 tras imputación kNN).
+
+El análisis se estructura en los siguientes bloques:
+
+1. **Bloque 1. Preparación de datos**: importación del dataset, definición de la variable respuesta, construcción de la matriz de predictores unificada y gestión de datos faltantes.
+2. **Bloque 2. Ajuste del modelo LASSO con validación cruzada**: selección del parámetro de regularización óptimo λ mediante validación cruzada 10-fold, ajuste del modelo final y extracción de coeficientes no nulos.
+3. **Bloque 3. Evaluación del modelo**: curva ROC, AUC, sensibilidad, especificidad y comparación con biomarcadores individuales (IFN-α sérico, C3, C4).
+4. **Bloque 4. Visualización e interpretación**: gráfico de coeficientes LASSO, trayectorias de regularización y comparación de AUC entre modelos.
+5. **Bloque 5. Exportación de resultados**: dataset con scores de riesgo, coeficientes y métricas de rendimiento.
+
+---
+
+# Carga de paquetes
+
+```{r paquetes, message=FALSE, warning=FALSE}
+if (!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+
+paquetescran <- c(
+  "dplyr", "tidyr", "ggplot2", "knitr", "kableExtra",
+  "tibble", "forcats", "scales", "purrr", "broom", "ggpubr",
+  "RColorBrewer", "reshape2", "VIM",
+  "glmnet", "pROC", "caret", "plotROC"
+)
+
+for (pkg in paquetescran) {
+  if (!requireNamespace(pkg, quietly = TRUE)) install.packages(pkg)
+  library(pkg, character.only = TRUE)
+}
+
+# Evitar conflictos de nombres
+select <- dplyr::select
+filter <- dplyr::filter
+```
+
+---
+
+# Paleta de colores
+
+```{r paleta}
+# Paleta común para los cinco modelos (coherente con los RMD de DIABLO)
+col_sledai  <- "#cb181d"   # rojo oscuro — SLEDAI-2K
+col_sledas  <- "#2171b5"   # azul — SLE-DAS
+col_slicc   <- "#238b45"   # verde — SLICC-SDI
+col_doris   <- "#6a51a3"   # púrpura — DORIS
+col_estricta <- "#8c6d31"  # marrón — Remisión estricta
+
+# Colores por grupo (genérico, positivo = evento = remisión/sin daño)
+col_pos <- "#fc8d59"   # naranja — clase positiva (remisión / sin daño)
+col_neg <- "#91bfdb"   # azul claro — clase negativa (actividad / daño)
+
+# Paleta para comparación de modelos individuales vs. multiómica
+col_lasso  <- "#252525"
+col_ifna   <- "#d94801"
+col_c3     <- "#2171b5"
+col_c4     <- "#238b45"
+```
+
+---
+
+# Bloque 1. Preparación de datos
+
+## Importación del dataset
+
+Se importa el objeto `DataSet_CorrelacionBivariada.rds` generado en el documento anterior (*Asociación de la firma transcriptómica de interferón tipo I con índices de actividad y biomarcadores séricos en LES*), que contiene las variables clínicas, las citoquinas séricas, la expresión relativa de cada gen, el IFN-score de 72 ISGs y la clasificación IFN-high/IFN-low para los pacientes LES.
+
+```{r importar}
+df <- readRDS("DataSet_CorrelacionBivariada.rds")
+df <- as.data.frame(df)
+cat("Dimensiones", nrow(df), "filas x", ncol(df), "columnas\n")
+```
+
+## Definición de los genes ISG y variables proteómicas
+
+```{r definir-variables}
+# --- ISGs del panel NanoString (72 genes, escala log2 normalizada) -----------
+isggenes <- c(
+  "BDCA1","BST2","CEACAM1","CMPK2","CXCL10","CXCL9","DDX60","DNAJA1",
+  "EIFAK2","EPSTI1","GBP1","GBP4","GBP5","HERC5","HERC6","IFI16","IFI27",
+  "IFI35","IFI44","IFI44L","IFI6","IFIH1","IFIT1","IFIT2","IFIT3","IFIT5",
+  "IFITM1","IFITM3","IL1RN","IL6","IRF1","IRF7","ISG15","ISG20","LAMP3",
+  "LGALS3BP","LY6E","MX1","MX2","MYD88","NC0A7","NT5C3B","OAS1","OAS2",
+  "OAS3","OASL","PARP12","PARP9","PHF11","PLSCR1","PRKR","PSMB9","RSAD2",
+  "RTP4","SAMD9L","SERPING1","SIGLEC1","SOCS1","SP100","SP140","SPATS2L",
+  "STAT1","TAP1","TNFAIP6","TNFSF10","TRIM38","TYK2","UB2L6","UNC93B1",
+  "USP18","XAF1","ZBP1"
+)
+
+isgdisponibles <- intersect(isggenes, names(df))
+cat("Genes ISG disponibles en el dataset", length(isgdisponibles), "de", length(isggenes))
+
+# --- Bloque proteómico (variables con ≤70% datos faltantes) ------------------
+proteinassericas <- c(
+  "IFNapgml", "IFNgpgml", "IL2pgml", "IL6pgml", "IL8pgml", "baffpgml",
+  "c3", "c4",
+  "pcrmgl", "creatinina",
+  "colesterol", "trigli", "hdl", "ldl", "apoa1", "apob", "apoba",
+  "lipoprotein_a",
+  "got", "gpt", "ggt", "prot_tot"
+)
+
+proteinasdisponibles <- intersect(proteinassericas, names(df))
+cat("Proteínas séricas disponibles", length(proteinasdisponibles))
+```
+
+## Exclusión de variables con >70% de datos faltantes
+
+## Exclusión de variables con >70% de datos faltantes
+
+```{r faltantes-prot}
+umbral_na <- 0.70
+
+missingprot <- df %>%
+  dplyr::select(all_of(proteinasdisponibles)) %>%
+  summarise(across(everything(), ~ round(100 * mean(is.na(.)), 1))) %>%
+  pivot_longer(everything(), names_to = "Variable", values_to = "PctNA") %>%
+  arrange(desc(PctNA))
+
+# Etiquetas legibles
+etiqprot <- c(
+  pcrmgl       = "PCR mg/L",
+  creatinina   = "Creatinina mg/dL",
+  colesterol   = "Colesterol total mg/dL",
+  trigli       = "Triglicéridos mg/dL",
+  hdl          = "HDL mg/dL",
+  ldl          = "LDL mg/dL",
+  apoa1        = "Apo A-I mg/dL",
+  apob         = "Apo B mg/dL",
+  apoba        = "Cociente Apo B/A-I",
+  lipoproteina = "Lipoproteína(a) mg/dL",
+  c3           = "C3 mg/dL",
+  c4           = "C4 mg/dL",
+  got          = "GOT/AST U/L",
+  gpt          = "GPT/ALT U/L",
+  ggt          = "GGT U/L",
+  prot_tot      = "Proteínas totales g/dL",
+  IFNapgml     = "IFN-α pg/mL",
+  IFNgpgml     = "IFN-γ pg/mL",
+  IL2pgml      = "IL-2 pg/mL",
+  IL6pgml      = "IL-6 pg/mL",
+  IL8pgml      = "IL-8 pg/mL",
+  baffpgml     = "BAFF pg/mL"
+)
+
+missingprot <- missingprot %>%
+  mutate(Etiqueta = ifelse(Variable %in% names(etiqprot),
+                           etiqprot[Variable], Variable))
+
+kable(missingprot %>% dplyr::select(Etiqueta, PctNA),
+      caption = "Tabla 1. Porcentaje de datos faltantes en el bloque proteómico sérico.",
+      col.names = c("Variable", "% Faltantes"),
+      align = "lc") %>%
+  kable_styling(bootstrap_options = c("striped","hover","condensed"),
+                full_width = FALSE, font_size = 13) %>%
+  footnote(general = paste0(
+    "Proteínas con >70% de datos faltantes se excluyen del bloque proteómico. ",
+    "La imputación de valores faltantes restantes se realiza mediante el método kNN (k=5)."),
+    general_title = "Nota")
+
+# Variables a incluir (≤70% NA)
+protincluir <- missingprot %>%
+  filter(PctNA <= umbral_na * 100) %>%
+  pull(Variable)
+
+cat("Variables proteómicas incluidas en LASSO:", length(protincluir))
+```
+
+
+
+## Construcción de la matriz de predictores unificada
+
+El modelo LASSO recibe una **única matriz de predictores** X que combina los dos bloques ómicos (transcriptómico + proteómico) en lugar de la estructura de lista que requiere DIABLO. Esta concatenación horizontal es coherente con el enfoque de regresión penalizada multivariante.
+
+```{r construir-X}
+
+# Bloque transcriptómico
+isg_mat <- df %>%
+  dplyr::select(all_of(isgdisponibles)) %>%
+  as.matrix()
+rownames(isg_mat) <- df$id2
+
+# Bloque proteómico 
+prot_mat <- df %>%
+  dplyr::select(all_of(protincluir)) %>%
+  as.matrix()
+rownames(prot_mat) <- df$id2
+
+# Imputación kNN (k=5) si hay valores faltantes
+if (any(is.na(prot_mat))) {
+  cat("Imputando valores faltantes en bloque proteómico (kNN, k=5)...\n")
+  ids_orig <- rownames(prot_mat)
+  prot_imp <- VIM::kNN(as.data.frame(prot_mat), k = 5, imp_var = FALSE)
+  prot_imp <- as.matrix(prot_imp)
+  rownames(prot_imp) <- ids_orig
+} else {
+  prot_imp <- prot_mat
+}
+
+# Transformación log2
+bloque_prot_log2 <- log2(prot_imp + 1)
+rownames(bloque_prot_log2) <- rownames(prot_imp)
+
+# Matriz unificada: ISGs + proteómica
+X_full <- cbind(isg_mat, bloque_prot_log2)
+
+cat("Dimensiones de la matriz de predictores X:", nrow(X_full), "filas x",
+    ncol(X_full), "columnas\n")
+cat("  → ISGs:", length(isgdisponibles),
+    "| Proteínas:", ncol(bloque_prot_log2), "\n")
+```
+
+---
+
+# Bloque 2. Modelos LASSO por desenlace
+
+Para cada desenlace se sigue el mismo flujo analítico:
+
+1. Definición de la **variable respuesta binaria** Y.
+2. Alineación de la matriz X con Y (exclusión de casos con Y faltante).
+3. **Validación cruzada 10-fold** con `cv.glmnet` para seleccionar λ.
+4. Ajuste del **modelo final** con λ óptimo (criterio: `lambda.1se` por parsimonia o `lambda.min` si BER es muy alto).
+5. Extracción de **coeficientes no nulos** (variables seleccionadas).
+
+## SLEDAI-2K
+
+### Definición de Y
+
+```{r lasso-sledai-y}
+# Remisión SLEDAI-2K: 0 = remisión, 1 = actividad
+df_sledai <- df %>%
+  filter(!is.na(sledai)) %>%
+  mutate(
+    Y_sledai = case_when(
+      sledai == 0 ~ "Remision",
+      TRUE        ~ "Activo"
+    ),
+    Y_sledai = factor(Y_sledai, levels = c("Remision","Activo"))
+  )
+
+cat("Distribución Y_sledai:\n")
+print(table(df_sledai$Y_sledai))
+
+# Alinear X con Y
+X_sledai <- X_full[df_sledai$id2, ]
+Y_sledai <- df_sledai$Y_sledai
+names(Y_sledai) <- df_sledai$id2
+
+stopifnot(identical(rownames(X_sledai), names(Y_sledai)))
+cat("N total para LASSO SLEDAI:", nrow(X_sledai))
+```
+
+### Validación cruzada y selección de λ
+
+```{r lasso-sledai-cv}
+set.seed(123)
+
+# cv.glmnet con familia binomial y métrica AUC
+cv_sledai <- cv.glmnet(
+  x        = X_sledai,
+  y        = Y_sledai,
+  family   = "binomial",
+  alpha    = 1,            # LASSO puro
+  nfolds   = 10,
+  type.measure = "auc",
+  standardize  = TRUE
+)
+
+# Parámetros lambda
+lambda_min_sledai  <- cv_sledai$lambda.min
+lambda_1se_sledai  <- cv_sledai$lambda.1se
+
+cat(sprintf("λ mínimo (AUC máximo): %.6f\n", lambda_min_sledai))
+cat(sprintf("λ 1SE   (parsimonia):  %.6f\n", lambda_1se_sledai))
+
+# Tabla resumen
+kable(
+  data.frame(
+    Criterio    = c("lambda.min (AUC máximo)", "lambda.1se (parsimonia)"),
+    Lambda      = round(c(lambda_min_sledai, lambda_1se_sledai), 6),
+    AUC_medio   = round(c(
+      cv_sledai$cvm[cv_sledai$lambda == lambda_min_sledai],
+      cv_sledai$cvm[cv_sledai$lambda == lambda_1se_sledai]
+    ), 3)
+  ),
+  caption = "Tabla 2a. Selección de λ en el modelo LASSO — Remisión SLEDAI-2K.",
+  col.names = c("Criterio", "λ", "AUC medio CV"),
+  align = "lcc"
+) %>%
+  kable_styling(bootstrap_options = c("striped","hover","condensed"),
+                full_width = FALSE, font_size = 13)
+```
+
+```{r lasso-sledai-cv-plot, fig.cap="Figura 1a. Curva de validación cruzada (AUC) en función de log(λ) — Modelo SLEDAI-2K."}
+# Aumentar margen superior para que quepan título + nº de variables
+op <- par(mar = c(5, 4, 5, 2) + 0.1)
+
+# Curva CV de glmnet sin título (lo añadimos con mtext)
+plot(cv_sledai,
+     main = "",
+     xlab = "-Log(λ)",
+     ylab = "AUC")
+
+# Líneas verticales para lambda.min y lambda.1se
+abline(v = log(lambda_min_sledai), col = col_sledai, lty = 4, lwd = 1.5)
+abline(v = log(lambda_1se_sledai),  col = "gray40",    lty = 3, lwd = 1.5)
+
+# Título, un poco más arriba para no pisar los números superiores
+mtext("CV LASSO — Remisión SLEDAI-2K",
+      side = 3, line = 3, cex = 1.2)
+
+# Leyenda
+legend("bottomright",
+       legend = c("lambda.min", "lambda.1se"),
+       col    = c(col_sledai, "gray40"),
+       lty    = c(4, 3),
+       lwd    = 1.5,
+       cex    = 0.8)
+
+# Restaurar parámetros gráficos
+par(op)
+```
+
+
+### Modelo final y coeficientes
+
+```{r lasso-sledai-final}
+# Ajuste con lambda.1se (parsimonia)
+modelo_sledai <- glmnet(
+  x      = X_sledai,
+  y      = Y_sledai,
+  family = "binomial",
+  alpha  = 1,
+  lambda = lambda_1se_sledai,
+  standardize = TRUE
+)
+
+# Extracción de coeficientes no nulos
+coef_sledai <- coef(modelo_sledai)
+coef_df_sledai <- data.frame(
+  Variable   = rownames(coef_sledai),
+  Coeficiente = as.numeric(coef_sledai)
+) %>%
+  filter(Coeficiente != 0, Variable != "(Intercept)") %>%
+  mutate(AbsCoef = abs(Coeficiente)) %>%
+  arrange(desc(AbsCoef))
+
+cat("Variables seleccionadas por LASSO (λ=1SE):", nrow(coef_df_sledai))
+
+kable(
+  coef_df_sledai %>% dplyr::select(Variable, Coeficiente, AbsCoef),
+  caption = "Tabla 3a. Coeficientes LASSO no nulos — Remisión SLEDAI-2K (λ=1SE).",
+  col.names = c("Variable", "Coeficiente", "abs.Coeficiente"),
+  digits = 4,
+  align = "lcc"
+) %>%
+  kable_styling(bootstrap_options = c("striped","hover","condensed"),
+                full_width = FALSE, font_size = 13) %>%
+  footnote(general = "Solo se muestran variables con coeficiente LASSO ≠ 0 tras penalización con λ=1SE.",
+           general_title = "Nota")
+```
+
+---
+
+## SLE-DAS 
+
+### Definición de Y
+
+```{r lasso-sledas-y}
+df_sledas <- df %>%
+  filter(!is.na(sledas)) %>%
+  mutate(
+    Y_sledas = case_when(
+      sledas < 2.08 ~ "Remision",
+      TRUE          ~ "NoRemision"
+    ),
+    Y_sledas = factor(Y_sledas, levels = c("Remision","NoRemision"))
+  )
+
+cat("Distribución Y_sledas:\n")
+print(table(df_sledas$Y_sledas))
+
+X_sledas <- X_full[df_sledas$id2, ]
+Y_sledas  <- df_sledas$Y_sledas
+names(Y_sledas) <- df_sledas$id2
+
+stopifnot(identical(rownames(X_sledas), names(Y_sledas)))
+cat("N total para LASSO SLE-DAS:", nrow(X_sledas))
+```
+
+### Validación cruzada y selección de λ
+
+```{r lasso-sledas-cv}
+set.seed(123)
+
+cv_sledas <- cv.glmnet(
+  x = X_sledas, y = Y_sledas,
+  family = "binomial", alpha = 1, nfolds = 10,
+  type.measure = "auc", standardize = TRUE
+)
+
+lambda_min_sledas <- cv_sledas$lambda.min
+lambda_1se_sledas <- cv_sledas$lambda.1se
+
+cat(sprintf("λ mínimo: %.6f\n", lambda_min_sledas))
+cat(sprintf("λ 1SE:    %.6f\n", lambda_1se_sledas))
+
+kable(
+  data.frame(
+    Criterio  = c("lambda.min", "lambda.1se"),
+    Lambda    = round(c(lambda_min_sledas, lambda_1se_sledas), 6),
+    AUC_medio = round(c(
+      cv_sledas$cvm[cv_sledas$lambda == lambda_min_sledas],
+      cv_sledas$cvm[cv_sledas$lambda == lambda_1se_sledas]
+    ), 3)
+  ),
+  caption = "Tabla 2b. Selección de λ en el modelo LASSO — Remisión SLE-DAS.",
+  col.names = c("Criterio", "λ", "AUC medio CV"), align = "lcc"
+) %>%
+  kable_styling(bootstrap_options = c("striped","hover","condensed"),
+                full_width = FALSE, font_size = 13)
+```
+
+```{r lasso-sledas-cv-plot, fig.cap="Figura 1b. Curva CV LASSO — Remisión SLE-DAS."}
+# Aumentar margen superior para que quepan título + nº de variables
+op <- par(mar = c(5, 4, 5, 2) + 0.1)
+
+# Curva CV de glmnet sin título (lo añadimos con mtext)
+plot(cv_sledas,
+     main = "",
+     xlab = "-Log(λ)",
+     ylab = "AUC")
+
+# Líneas verticales para lambda.min y lambda.1se
+abline(v = log(lambda_min_sledas), col = col_sledas, lty = 4, lwd = 1.5)
+abline(v = log(lambda_1se_sledas),  col = "gray40",    lty = 3, lwd = 1.5)
+
+# Título, un poco más arriba para no pisar los números superiores
+mtext("CV LASSO — Remisión SLEDAS",
+      side = 3, line = 3, cex = 1.2)
+
+# Leyenda
+legend("bottomright",
+       legend = c("lambda.min", "lambda.1se"),
+       col    = c(col_sledas, "gray40"),
+       lty    = c(4, 3),
+       lwd    = 1.5,
+       cex    = 0.8)
+
+# Restaurar parámetros gráficos
+par(op)
+```
+
+### Modelo final y coeficientes
+
+```{r lasso-sledas-final}
+modelo_sledas <- glmnet(
+  x = X_sledas, y = Y_sledas,
+  family = "binomial", alpha = 1,
+  lambda = lambda_1se_sledas, standardize = TRUE
+)
+
+coef_sledas    <- coef(modelo_sledas)
+coef_df_sledas <- data.frame(
+  Variable    = rownames(coef_sledas),
+  Coeficiente = as.numeric(coef_sledas)
+) %>%
+  filter(Coeficiente != 0, Variable != "(Intercept)") %>%
+  mutate(AbsCoef = abs(Coeficiente)) %>%
+  arrange(desc(AbsCoef))
+
+cat("Variables seleccionadas (λ=1SE):", nrow(coef_df_sledas))
+
+kable(coef_df_sledas %>% dplyr::select(Variable, Coeficiente, AbsCoef),
+      caption = "Tabla 3b. Coeficientes LASSO no nulos — Remisión SLE-DAS (λ=1SE).",
+      col.names = c("Variable","Coeficiente","abs.Coeficiente"),
+      digits = 4, align = "lcc") %>%
+  kable_styling(bootstrap_options = c("striped","hover","condensed"),
+                full_width = FALSE, font_size = 13)
+```
+
+---
+
+## SLICC-SDI 
+
+### Definición de Y
+
+```{r lasso-slicc-y}
+df_slicc <- df %>%
+  filter(!is.na(slicc)) %>%
+  mutate(
+    Y_slicc = case_when(
+      slicc == 0 ~ "SinDano",
+      TRUE       ~ "ConDano"
+    ),
+    Y_slicc = factor(Y_slicc, levels = c("SinDano", "ConDano"))
+  ) %>%
+  filter(!is.na(Y_slicc))
+
+cat("Distribución Y_slicc:\n")
+print(table(df_slicc$Y_slicc))
+
+X_slicc <- X_full[df_slicc$id2, ]
+Y_slicc  <- df_slicc$Y_slicc
+names(Y_slicc) <- df_slicc$id2
+
+stopifnot(identical(rownames(X_slicc), names(Y_slicc)))
+cat("N total para LASSO SLICC-SDI:", nrow(X_slicc), "\n")
+```
+
+### Validación cruzada y selección de λ
+
+```{r lasso-slicc-cv}
+set.seed(123)
+
+cv_slicc <- cv.glmnet(
+  x = X_slicc, y = Y_slicc,
+  family = "binomial", alpha = 1, nfolds = 10,
+  type.measure = "auc", standardize = TRUE
+)
+
+lambda_min_slicc <- cv_slicc$lambda.min
+lambda_1se_slicc <- cv_slicc$lambda.1se
+
+cat(sprintf("λ mínimo: %.6f\n", lambda_min_slicc))
+cat(sprintf("λ 1SE:    %.6f\n", lambda_1se_slicc))
+
+kable(
+  data.frame(
+    Criterio  = c("lambda.min","lambda.1se"),
+    Lambda    = round(c(lambda_min_slicc, lambda_1se_slicc), 6),
+    AUC_medio = round(c(
+      cv_slicc$cvm[cv_slicc$lambda == lambda_min_slicc],
+      cv_slicc$cvm[cv_slicc$lambda == lambda_1se_slicc]
+    ), 3)
+  ),
+  caption = "Tabla 2c. Selección de λ — SLICC-SDI.",
+  col.names = c("Criterio","λ","AUC medio CV"), align = "lcc"
+) %>%
+  kable_styling(bootstrap_options = c("striped","hover","condensed"),
+                full_width = FALSE, font_size = 13)
+```
+
+```{r lasso-slicc-cv-plot, fig.cap="Figura 1c. Curva CV LASSO — SLICC-SDI."}
+# Aumentar margen superior para que quepan título + nº de variables
+op <- par(mar = c(5, 4, 5, 2) + 0.1)
+
+# Curva CV de glmnet sin título (lo añadimos con mtext)
+plot(cv_slicc,
+     main = "",
+     xlab = "-Log(λ)",
+     ylab = "AUC")
+
+# Líneas verticales para lambda.min y lambda.1se
+abline(v = log(lambda_min_slicc), col = col_slicc, lty = 4, lwd = 1.5)
+abline(v = log(lambda_1se_slicc),  col = "gray40",    lty = 3, lwd = 1.5)
+
+# Título, un poco más arriba para no pisar los números superiores
+mtext("CV LASSO — Remisión SLICC",
+      side = 3, line = 3, cex = 1.2)
+
+# Leyenda
+legend("bottomright",
+       legend = c("lambda.min", "lambda.1se"),
+       col    = c(col_slicc, "gray40"),
+       lty    = c(4, 3),
+       lwd    = 1.5,
+       cex    = 0.8)
+
+# Restaurar parámetros gráficos
+par(op)
+```
+
+### Modelo final y coeficientes
+
+```{r lasso-slicc-final}
+modelo_slicc <- glmnet(
+  x = X_slicc, y = Y_slicc,
+  family = "binomial", alpha = 1,
+  lambda = lambda_1se_slicc, standardize = TRUE
+)
+
+coef_slicc    <- coef(modelo_slicc)
+coef_df_slicc <- data.frame(
+  Variable    = rownames(coef_slicc),
+  Coeficiente = as.numeric(coef_slicc)
+) %>%
+  filter(Coeficiente != 0, Variable != "(Intercept)") %>%
+  mutate(AbsCoef = abs(Coeficiente)) %>%
+  arrange(desc(AbsCoef))
+
+cat("Variables seleccionadas (λ=1SE):", nrow(coef_df_slicc))
+
+kable(coef_df_slicc %>% dplyr::select(Variable, Coeficiente, AbsCoef),
+      caption = "Tabla 3c. Coeficientes LASSO no nulos — SLICC-SDI (λ=1SE).",
+      col.names = c("Variable","Coeficiente","abs.Coeficiente"),
+      digits = 4, align = "lcc") %>%
+  kable_styling(bootstrap_options = c("striped","hover","condensed"),
+                full_width = FALSE, font_size = 13)
+```
+
+---
+
+## DORIS 
+
+### Definición de Y
+
+```{r lasso-doris-y}
+
+df_doris <- df %>%
+  filter(!is.na(doris)) %>%
+  mutate(
+    Y_doris = case_when(
+      as.character(doris) == "Sí" ~ "Cumple",
+      as.character(doris) == "No" ~ "NoCumple",
+      TRUE                        ~ NA_character_
+    ),
+    Y_doris = factor(Y_doris, levels = c("Cumple", "NoCumple"))
+  ) %>%
+  filter(!is.na(Y_doris))
+
+cat("Distribución Y_doris:\n")
+print(table(df_doris$Y_doris))
+
+X_doris <- X_full[df_doris$id2, ]
+Y_doris  <- df_doris$Y_doris
+names(Y_doris) <- df_doris$id2
+
+stopifnot(identical(rownames(X_doris), names(Y_doris)))
+cat("N total para LASSO DORIS:", nrow(X_doris), "\n")
+```
+
+### Validación cruzada y selección de λ
+
+```{r lasso-doris-cv}
+set.seed(123)
+
+cv_doris <- cv.glmnet(
+  x = X_doris, y = Y_doris,
+  family = "binomial", alpha = 1, nfolds = 10,
+  type.measure = "auc", standardize = TRUE
+)
+
+lambda_min_doris <- cv_doris$lambda.min
+lambda_1se_doris  <- cv_doris$lambda.1se
+
+kable(
+  data.frame(
+    Criterio  = c("lambda.min","lambda.1se"),
+    Lambda    = round(c(lambda_min_doris, lambda_1se_doris), 6),
+    AUC_medio = round(c(
+      cv_doris$cvm[cv_doris$lambda == lambda_min_doris],
+      cv_doris$cvm[cv_doris$lambda == lambda_1se_doris]
+    ), 3)
+  ),
+  caption = "Tabla 2d. Selección de λ — DORIS.",
+  col.names = c("Criterio","λ","AUC medio CV"), align = "lcc"
+) %>%
+  kable_styling(bootstrap_options = c("striped","hover","condensed"),
+                full_width = FALSE, font_size = 13)
+```
+
+```{r lasso-doris-cv-plot, fig.cap="Figura 1d. Curva CV LASSO — DORIS."}
+# Aumentar margen superior para que quepan título + nº de variables
+op <- par(mar = c(5, 4, 5, 2) + 0.1)
+
+# Curva CV de glmnet sin título (lo añadimos con mtext)
+plot(cv_doris,
+     main = "",
+     xlab = "-Log(λ)",
+     ylab = "AUC")
+
+# Líneas verticales para lambda.min y lambda.1se
+abline(v = log(lambda_min_doris), col = col_doris, lty = 4, lwd = 1.5)
+abline(v = log(lambda_1se_doris),  col = "gray40",    lty = 3, lwd = 1.5)
+
+# Título, un poco más arriba para no pisar los números superiores
+mtext("CV LASSO — Remisión DORIS",
+      side = 3, line = 3, cex = 1.2)
+
+# Leyenda
+legend("bottomright",
+       legend = c("lambda.min", "lambda.1se"),
+       col    = c(col_doris, "gray40"),
+       lty    = c(4, 3),
+       lwd    = 1.5,
+       cex    = 0.8)
+
+# Restaurar parámetros gráficos
+par(op)
+```
+
+### Modelo final y coeficientes
+
+```{r lasso-doris-final}
+modelo_doris <- glmnet(
+  x = X_doris, y = Y_doris,
+  family = "binomial", alpha = 1,
+  lambda = lambda_1se_doris, standardize = TRUE
+)
+
+coef_doris    <- coef(modelo_doris)
+coef_df_doris <- data.frame(
+  Variable    = rownames(coef_doris),
+  Coeficiente = as.numeric(coef_doris)
+) %>%
+  filter(Coeficiente != 0, Variable != "(Intercept)") %>%
+  mutate(AbsCoef = abs(Coeficiente)) %>%
+  arrange(desc(AbsCoef))
+
+cat("Variables seleccionadas (λ=1SE):", nrow(coef_df_doris))
+
+kable(coef_df_doris %>% dplyr::select(Variable, Coeficiente, AbsCoef),
+      caption = "Tabla 3d. Coeficientes LASSO no nulos — DORIS (λ=1SE).",
+      col.names = c("Variable","Coeficiente","abs.Coeficiente"),
+      digits = 4, align = "lcc") %>%
+  kable_styling(bootstrap_options = c("striped","hover","condensed"),
+                full_width = FALSE, font_size = 13)
+```
+
+---
+
+## Remisión Estricta 
+
+### Definición de Y
+
+```{r lasso-estricta-y}
+varsnecesarias <- c("sledai","sledas","slicc")
+varsfaltantes  <- setdiff(varsnecesarias, names(df))
+
+if (length(varsfaltantes) > 0)
+  stop(paste("No se encuentran:", paste(varsfaltantes, collapse=", ")))
+
+df_estricta <- df %>%
+  filter(!is.na(sledai), !is.na(sledas), !is.na(slicc)) %>%
+  mutate(
+    crit_sledai = sledai == 0,
+    crit_sledas = sledas < 2.08,
+    crit_slicc  = slicc  == 0,
+    Y_estricta  = case_when(
+      crit_sledai & crit_sledas & crit_slicc ~ "RemisionEstricta",
+      TRUE                                   ~ "NoRemisionEstricta"
+    ),
+    Y_estricta = factor(Y_estricta,
+                        levels = c("RemisionEstricta","NoRemisionEstricta"))
+  )
+
+cat("Distribución Y_estricta:\n")
+print(table(df_estricta$Y_estricta))
+
+X_estricta <- X_full[df_estricta$id2, ]
+Y_estricta  <- df_estricta$Y_estricta
+names(Y_estricta) <- df_estricta$id2
+
+stopifnot(identical(rownames(X_estricta), names(Y_estricta)))
+cat("N total para LASSO Remisión Estricta:", nrow(X_estricta))
+```
+
+### Validación cruzada y selección de λ
+
+```{r lasso-estricta-cv}
+set.seed(123)
+
+cv_estricta <- cv.glmnet(
+  x = X_estricta, y = Y_estricta,
+  family = "binomial", alpha = 1, nfolds = 10,
+  type.measure = "auc", standardize = TRUE
+)
+
+lambda_min_estricta <- cv_estricta$lambda.min
+lambda_1se_estricta <- cv_estricta$lambda.1se
+
+kable(
+  data.frame(
+    Criterio  = c("lambda.min","lambda.1se"),
+    Lambda    = round(c(lambda_min_estricta, lambda_1se_estricta), 6),
+    AUC_medio = round(c(
+      cv_estricta$cvm[cv_estricta$lambda == lambda_min_estricta],
+      cv_estricta$cvm[cv_estricta$lambda == lambda_1se_estricta]
+    ), 3)
+  ),
+  caption = "Tabla 2e. Selección de λ — Remisión estricta compuesta.",
+  col.names = c("Criterio","λ","AUC medio CV"), align = "lcc"
+) %>%
+  kable_styling(bootstrap_options = c("striped","hover","condensed"),
+                full_width = FALSE, font_size = 13)
+```
+
+```{r lasso-estricta-cv-plot, fig.cap="Figura 1e. Curva CV LASSO — Remisión estricta."}
+# Aumentar margen superior para que quepan título + nº de variables
+op <- par(mar = c(5, 4, 5, 2) + 0.1)
+
+# Curva CV de glmnet sin título (lo añadimos con mtext)
+plot(cv_estricta,
+     main = "",
+     xlab = "-Log(λ)",
+     ylab = "AUC")
+
+# Líneas verticales para lambda.min y lambda.1se
+abline(v = log(lambda_min_estricta), col = col_estricta, lty = 4, lwd = 1.5)
+abline(v = log(lambda_1se_estricta),  col = "gray40",    lty = 3, lwd = 1.5)
+
+# Título, un poco más arriba para no pisar los números superiores
+mtext("CV LASSO — Remisión Estricta",
+      side = 3, line = 3, cex = 1.2)
+
+# Leyenda
+legend("bottomright",
+       legend = c("lambda.min", "lambda.1se"),
+       col    = c(col_estricta, "gray40"),
+       lty    = c(4, 3),
+       lwd    = 1.5,
+       cex    = 0.8)
+
+# Restaurar parámetros gráficos
+par(op)
+```
+
+### Modelo final y coeficientes
+
+```{r lasso-estricta-final}
+modelo_estricta <- glmnet(
+  x = X_estricta, y = Y_estricta,
+  family = "binomial", alpha = 1,
+  lambda = lambda_1se_estricta, standardize = TRUE
+)
+
+coef_estricta    <- coef(modelo_estricta)
+coef_df_estricta <- data.frame(
+  Variable    = rownames(coef_estricta),
+  Coeficiente = as.numeric(coef_estricta)
+) %>%
+  filter(Coeficiente != 0, Variable != "(Intercept)") %>%
+  mutate(AbsCoef = abs(Coeficiente)) %>%
+  arrange(desc(AbsCoef))
+
+cat("Variables seleccionadas (λ=1SE):", nrow(coef_df_estricta))
+
+kable(coef_df_estricta %>% dplyr::select(Variable, Coeficiente, AbsCoef),
+      caption = "Tabla 3e. Coeficientes LASSO no nulos — Remisión estricta (λ=1SE).",
+      col.names = c("Variable","Coeficiente","abs.Coeficiente"),
+      digits = 4, align = "lcc") %>%
+  kable_styling(bootstrap_options = c("striped","hover","condensed"),
+                full_width = FALSE, font_size = 13)
+```
+
+---
+
+# Bloque 3. Evaluación del modelo: curvas ROC y AUC
+
+Se estima el rendimiento discriminativo de cada modelo LASSO mediante curvas ROC y el área bajo la curva (AUC) con el paquete `pROC` [@Robin2011], utilizando la probabilidad predicha por el modelo sobre la **muestra completa** (evaluación interna aparente). La validación cruzada del Bloque 2 proporciona las estimaciones de AUC generalizables.
+
+## Función auxiliar para curva ROC
+
+```{r roc-funcion}
+calcular_roc <- function(modelo, X, Y, clase_pos = levels(Y)[1]) {
+  prob <- predict(modelo, newx = X, type = "response")[, 1]
+  Y_bin <- as.numeric(Y == clase_pos)
+  roc_obj <- pROC::roc(response  = Y_bin,
+                       predictor = prob,
+                       quiet     = TRUE,
+                       direction = "<")
+  return(roc_obj)
+}
+```
+
+## AUC aparente por desenlace
+
+```{r auc-tabla}
+# Calcular ROC para cada modelo
+roc_sledai   <- calcular_roc(modelo_sledai,   X_sledai,   Y_sledai,   "Remision")
+roc_sledas   <- calcular_roc(modelo_sledas,   X_sledas,   Y_sledas,   "Remision")
+roc_slicc    <- calcular_roc(modelo_slicc,    X_slicc,    Y_slicc,    "SinDano")
+roc_doris    <- calcular_roc(modelo_doris,    X_doris,    Y_doris,    "Cumple")   
+roc_estricta <- calcular_roc(modelo_estricta, X_estricta, Y_estricta, "RemisionEstricta")
+
+# Tabla resumen AUC
+tabla_auc <- data.frame(
+  Desenlace  = c("SLEDAI-2K", "SLE-DAS", "SLICC-SDI", "DORIS", "Remisión estricta"),
+  AUC_lasso  = round(c(
+    as.numeric(pROC::auc(roc_sledai)),
+    as.numeric(pROC::auc(roc_sledas)),
+    as.numeric(pROC::auc(roc_slicc)),
+    as.numeric(pROC::auc(roc_doris)),
+    as.numeric(pROC::auc(roc_estricta))
+  ), 3),
+  N_vars     = c(
+    nrow(coef_df_sledai),
+    nrow(coef_df_sledas),
+    nrow(coef_df_slicc),
+    nrow(coef_df_doris),
+    nrow(coef_df_estricta)
+  ),
+  Lambda     = round(c(
+    lambda_1se_sledai, lambda_1se_sledas, lambda_1se_slicc,
+    lambda_1se_doris,  lambda_1se_estricta
+  ), 6)
+)
+
+kable(tabla_auc,
+      caption = "Tabla 4. Rendimiento del modelo LASSO por desenlace (AUC aparente, muestra completa).",
+      col.names = c("Desenlace", "AUC LASSO", "Variables seleccionadas", "λ (1SE)"),
+      align = "lccc") %>%
+  kable_styling(bootstrap_options = c("striped","hover","condensed"),
+                full_width = FALSE, font_size = 13) %>%
+  footnote(general = paste0(
+    "AUC estimado sobre la muestra completa (evaluación interna aparente). ",
+    "Las estimaciones generalizables se obtienen del AUC medio en la validación ",
+    "cruzada 10-fold reportado en el Bloque 2. λ=1SE: penalización con un error ",
+    "estándar por encima del mínimo (criterio de parsimonia)."),
+    general_title = "Nota")
+```
+
+## Curvas ROC superpuestas (cinco desenlaces)
+
+```{r roc-plot-todos, fig.cap="Figura 3. Curvas ROC del modelo LASSO para los cinco desenlaces clínicos (evaluación interna aparente).", fig.width=7, fig.height=6}
+colores_roc <- c(
+  "SLEDAI-2K"        = col_sledai,
+  "SLE-DAS"          = col_sledas,
+  "SLICC-SDI"        = col_slicc,
+  "DORIS"            = col_doris,
+  "Remisión estricta"= col_estricta
+)
+
+roc_list <- list(
+  "SLEDAI-2K"         = roc_sledai,
+  "SLE-DAS"           = roc_sledas,
+  "SLICC-SDI"         = roc_slicc,
+  "DORIS"             = roc_doris,
+  "Remisión estricta" = roc_estricta
+)
+
+# Base vacía
+plot(0, 0, type = "n",
+     xlim = c(1, 0), ylim = c(0, 1),
+     xlab = "1 – Especificidad",
+     ylab = "Sensibilidad",
+     main = "Curvas ROC — Modelo LASSO (cinco desenlaces)")
+abline(a = 0, b = 1, lty = 2, col = "gray60")
+
+for (nm in names(roc_list)) {
+  r  <- roc_list[[nm]]
+  sp <- rev(r$specificities)
+  se <- rev(r$sensitivities)
+  lines(1 - sp, se, col = colores_roc[nm], lwd = 2)
+}
+
+legend("topright",
+       legend = paste0(names(roc_list), "  (AUC=",
+                       round(sapply(roc_list, function(r) as.numeric(pROC::auc(r))), 2), ")"),
+       col    = colores_roc,
+       lwd    = 2, cex = 0.78, bty = "n")
+```
+
+## Comparación LASSO vs. biomarcadores individuales
+
+Se compara el AUC del modelo LASSO multi-ómico con el de tres biomarcadores individuales clave (IFN-α sérico, C3 y C4). 
+
+```{r roc-comparacion-sledai, fig.cap="Figura 4. Comparación de curvas ROC: LASSO multi-ómico vs. biomarcadores individuales (desenlace: Remisión SLEDAI-2K).", fig.width=7, fig.height=6}
+
+# ROC biomarcadores individuales
+df_roc_comp <- df_sledai %>%
+  dplyr::select(id2, IFNapgml, c3, c4)
+
+ids_comun <- intersect(rownames(X_sledai), df_roc_comp$id2)
+
+# Y_comp como factor con dos niveles limpios ← clave del fix
+Y_comp <- droplevels(Y_sledai[ids_comun])
+
+idx <- match(ids_comun, df_roc_comp$id2)
+
+roc_ifna_sledai <- pROC::roc(
+  response  = Y_comp,
+  predictor = df_roc_comp$IFNapgml[idx],
+  levels    = c("Activo", "Remision"),
+  direction = "<",
+  quiet     = TRUE
+)
+roc_c3_sledai <- pROC::roc(
+  response  = Y_comp,
+  predictor = df_roc_comp$c3[idx],
+  levels    = c("Activo", "Remision"),
+  direction = ">",
+  quiet     = TRUE
+)
+roc_c4_sledai <- pROC::roc(
+  response  = Y_comp,
+  predictor = df_roc_comp$c4[idx],
+  levels    = c("Activo", "Remision"),
+  direction = ">",
+  quiet     = TRUE
+)
+
+roc_lasso_comp <- calcular_roc(modelo_sledai,
+                               X_sledai[ids_comun, ],
+                               droplevels(Y_sledai[ids_comun]),
+                               "Remision")
+
+roc_comp_list <- list(
+  "LASSO multi-ómico" = roc_lasso_comp,
+  "IFN-α sérico"      = roc_ifna_sledai,
+  "C3"                = roc_c3_sledai,
+  "C4"                = roc_c4_sledai
+)
+colores_comp <- c(
+  "LASSO multi-ómico" = col_lasso,
+  "IFN-α sérico"      = col_ifna,
+  "C3"                = col_c3,
+  "C4"                = col_c4
+)
+
+plot(0, 0, type = "n",
+     xlim = c(1, 0), ylim = c(0, 1),
+     xlab = "1 – Especificidad", ylab = "Sensibilidad",
+     main = "ROC: LASSO vs. biomarcadores individuales\n(Desenlace: Remisión SLEDAI-2K)")
+abline(a = 0, b = 1, lty = 2, col = "gray60")
+
+lty_vec <- c(1, 2, 2, 2)
+for (i in seq_along(roc_comp_list)) {
+  nm <- names(roc_comp_list)[i]
+  r  <- roc_comp_list[[nm]]
+  sp <- rev(r$specificities)
+  se <- rev(r$sensitivities)
+  lines(1 - sp, se,
+        col = colores_comp[nm],
+        lwd = ifelse(i == 1, 2.5, 1.5),
+        lty = lty_vec[i])
+}
+
+legend("topright",
+       legend = paste0(names(roc_comp_list), "  (AUC=",
+                       round(sapply(roc_comp_list,
+                                    function(r) as.numeric(pROC::auc(r))), 2), ")"),
+       col  = colores_comp,
+       lwd  = c(2.5, 1.5, 1.5, 1.5),
+       lty  = lty_vec,
+       cex  = 0.8, bty = "n")
+
+# Tabla comparativa de AUC
+kable(
+  data.frame(
+    Modelo = names(roc_comp_list),
+    AUC    = round(sapply(roc_comp_list,
+                          function(r) as.numeric(pROC::auc(r))), 3)
+  ),
+  caption = "Tabla 5. AUC comparativo LASSO multi-ómico vs. biomarcadores individuales (Remisión SLEDAI-2K).",
+  col.names = c("Modelo/Biomarcador", "AUC (aparente)"),
+  align = "lc"
+) %>%
+  kable_styling(bootstrap_options = c("striped","hover","condensed"),
+                full_width = FALSE, font_size = 13) %>%
+  footnote(general = "AUC estimado sobre la muestra completa disponible para cada biomarcador.",
+           general_title = "Nota")
+```
+
+```{r roc-comparacion-sledas, fig.cap="Figura 5. Comparación de curvas ROC: LASSO multi-ómico vs. biomarcadores individuales (desenlace: Remisión SLE-DAS).", fig.width=7, fig.height=6}
+
+df_roc_comp_sledas <- df_sledas %>%
+  dplyr::select(id2, IFNapgml, c3, c4)
+
+ids_comun_sledas <- intersect(rownames(X_sledas), df_roc_comp_sledas$id2)
+Y_comp_sledas    <- droplevels(Y_sledas[ids_comun_sledas])
+idx_sledas       <- match(ids_comun_sledas, df_roc_comp_sledas$id2)
+
+roc_ifna_sledas <- pROC::roc(
+  response  = Y_comp_sledas,
+  predictor = df_roc_comp_sledas$IFNapgml[idx_sledas],
+  levels    = c("NoRemision", "Remision"),
+  direction = "<", quiet = TRUE
+)
+roc_c3_sledas <- pROC::roc(
+  response  = Y_comp_sledas,
+  predictor = df_roc_comp_sledas$c3[idx_sledas],
+  levels    = c("NoRemision", "Remision"),
+  direction = ">", quiet = TRUE
+)
+roc_c4_sledas <- pROC::roc(
+  response  = Y_comp_sledas,
+  predictor = df_roc_comp_sledas$c4[idx_sledas],
+  levels    = c("NoRemision", "Remision"),
+  direction = ">", quiet = TRUE
+)
+roc_lasso_sledas <- calcular_roc(modelo_sledas,
+                                 X_sledas[ids_comun_sledas, ],
+                                 droplevels(Y_sledas[ids_comun_sledas]),
+                                 "Remision")
+
+roc_comp_sledas <- list(
+  "LASSO multi-ómico" = roc_lasso_sledas,
+  "IFN-α sérico"      = roc_ifna_sledas,
+  "C3"                = roc_c3_sledas,
+  "C4"                = roc_c4_sledas
+)
+
+plot(0, 0, type = "n", xlim = c(1,0), ylim = c(0,1),
+     xlab = "1 – Especificidad", ylab = "Sensibilidad",
+     main = "ROC: LASSO vs. biomarcadores individuales\n(Desenlace: Remisión SLE-DAS)")
+abline(a = 0, b = 1, lty = 2, col = "gray60")
+lty_vec <- c(1, 2, 2, 2)
+for (i in seq_along(roc_comp_sledas)) {
+  nm <- names(roc_comp_sledas)[i]
+  r  <- roc_comp_sledas[[nm]]
+  lines(1 - rev(r$specificities), rev(r$sensitivities),
+        col = colores_comp[nm], lwd = ifelse(i==1, 2.5, 1.5), lty = lty_vec[i])
+}
+legend("topright",
+       legend = paste0(names(roc_comp_sledas), "  (AUC=",
+                       round(sapply(roc_comp_sledas, function(r) as.numeric(pROC::auc(r))), 2), ")"),
+       col = colores_comp, lwd = c(2.5,1.5,1.5,1.5), lty = lty_vec, cex = 0.8, bty = "n")
+
+kable(
+  data.frame(Modelo = names(roc_comp_sledas),
+             AUC    = round(sapply(roc_comp_sledas, function(r) as.numeric(pROC::auc(r))), 3)),
+  caption   = "Tabla 6. AUC comparativo LASSO vs. biomarcadores individuales (Remisión SLE-DAS).",
+  col.names = c("Modelo/Biomarcador", "AUC (aparente)"), align = "lc"
+) %>%
+  kable_styling(bootstrap_options = c("striped","hover","condensed"),
+                full_width = FALSE, font_size = 13) %>%
+  footnote(general = "AUC estimado sobre la muestra completa disponible para cada biomarcador.",
+           general_title = "Nota")
+```
+
+```{r roc-comparacion-slicc, fig.cap="Figura 6. Comparación de curvas ROC: LASSO multi-ómico vs. biomarcadores individuales (desenlace: Daño SLICC-SDI).", fig.width=7, fig.height=6}
+
+df_roc_comp_slicc <- df_slicc %>%
+  dplyr::select(id2, IFNapgml, c3, c4)
+
+ids_comun_slicc <- intersect(rownames(X_slicc), df_roc_comp_slicc$id2)
+Y_comp_slicc    <- droplevels(Y_slicc[ids_comun_slicc])
+idx_slicc       <- match(ids_comun_slicc, df_roc_comp_slicc$id2)
+
+roc_ifna_slicc <- pROC::roc(
+  response  = Y_comp_slicc,
+  predictor = df_roc_comp_slicc$IFNapgml[idx_slicc],
+  levels    = c("ConDano", "SinDano"),
+  direction = ">", quiet = TRUE
+)
+roc_c3_slicc <- pROC::roc(
+  response  = Y_comp_slicc,
+  predictor = df_roc_comp_slicc$c3[idx_slicc],
+  levels    = c("ConDano", "SinDano"),
+  direction = "<", quiet = TRUE
+)
+roc_c4_slicc <- pROC::roc(
+  response  = Y_comp_slicc,
+  predictor = df_roc_comp_slicc$c4[idx_slicc],
+  levels    = c("ConDano", "SinDano"),
+  direction = "<", quiet = TRUE
+)
+roc_lasso_slicc <- calcular_roc(modelo_slicc,
+                                X_slicc[ids_comun_slicc, ],
+                                droplevels(Y_slicc[ids_comun_slicc]),
+                                "SinDano")
+
+roc_comp_slicc <- list(
+  "LASSO multi-ómico" = roc_lasso_slicc,
+  "IFN-α sérico"      = roc_ifna_slicc,
+  "C3"                = roc_c3_slicc,
+  "C4"                = roc_c4_slicc
+)
+
+plot(0, 0, type = "n", xlim = c(1,0), ylim = c(0,1),
+     xlab = "1 – Especificidad", ylab = "Sensibilidad",
+     main = "ROC: LASSO vs. biomarcadores individuales\n(Desenlace: Daño SLICC-SDI)")
+abline(a = 0, b = 1, lty = 2, col = "gray60")
+lty_vec <- c(1, 2, 2, 2)
+for (i in seq_along(roc_comp_slicc)) {
+  nm <- names(roc_comp_slicc)[i]
+  r  <- roc_comp_slicc[[nm]]
+  lines(1 - rev(r$specificities), rev(r$sensitivities),
+        col = colores_comp[nm], lwd = ifelse(i==1, 2.5, 1.5), lty = lty_vec[i])
+}
+legend("topright",
+       legend = paste0(names(roc_comp_slicc), "  (AUC=",
+                       round(sapply(roc_comp_slicc, function(r) as.numeric(pROC::auc(r))), 2), ")"),
+       col = colores_comp, lwd = c(2.5,1.5,1.5,1.5), lty = lty_vec, cex = 0.8, bty = "n")
+
+kable(
+  data.frame(Modelo = names(roc_comp_slicc),
+             AUC    = round(sapply(roc_comp_slicc, function(r) as.numeric(pROC::auc(r))), 3)),
+  caption   = "Tabla 7. AUC comparativo LASSO vs. biomarcadores individuales (Daño SLICC-SDI).",
+  col.names = c("Modelo/Biomarcador", "AUC (aparente)"), align = "lc"
+) %>%
+  kable_styling(bootstrap_options = c("striped","hover","condensed"),
+                full_width = FALSE, font_size = 13) %>%
+  footnote(general = "AUC estimado sobre la muestra completa disponible para cada biomarcador.",
+           general_title = "Nota")
+```
+
+```{r roc-comparacion-doris, fig.cap="Figura 7. Comparación de curvas ROC: LASSO multi-ómico vs. biomarcadores individuales (desenlace: Remisión DORIS).", fig.width=7, fig.height=6}
+
+df_roc_comp_doris <- df_doris %>%
+  dplyr::select(id2, IFNapgml, c3, c4)
+
+ids_comun_doris <- intersect(rownames(X_doris), df_roc_comp_doris$id2)
+Y_comp_doris    <- droplevels(Y_doris[ids_comun_doris])
+idx_doris       <- match(ids_comun_doris, df_roc_comp_doris$id2)
+
+roc_ifna_doris <- pROC::roc(
+  response  = Y_comp_doris,
+  predictor = df_roc_comp_doris$IFNapgml[idx_doris],
+  levels    = c("NoCumple", "Cumple"),
+  direction = "<", quiet = TRUE
+)
+roc_c3_doris <- pROC::roc(
+  response  = Y_comp_doris,
+  predictor = df_roc_comp_doris$c3[idx_doris],
+  levels    = c("NoCumple", "Cumple"),
+  direction = ">", quiet = TRUE
+)
+roc_c4_doris <- pROC::roc(
+  response  = Y_comp_doris,
+  predictor = df_roc_comp_doris$c4[idx_doris],
+  levels    = c("NoCumple", "Cumple"),
+  direction = ">", quiet = TRUE
+)
+roc_lasso_doris <- calcular_roc(modelo_doris,
+                                X_doris[ids_comun_doris, ],
+                                droplevels(Y_doris[ids_comun_doris]),
+                                "Cumple")
+
+roc_comp_doris <- list(
+  "LASSO multi-ómico" = roc_lasso_doris,
+  "IFN-α sérico"      = roc_ifna_doris,
+  "C3"                = roc_c3_doris,
+  "C4"                = roc_c4_doris
+)
+
+plot(0, 0, type = "n", xlim = c(1,0), ylim = c(0,1),
+     xlab = "1 – Especificidad", ylab = "Sensibilidad",
+     main = "ROC: LASSO vs. biomarcadores individuales\n(Desenlace: Remisión DORIS)")
+abline(a = 0, b = 1, lty = 2, col = "gray60")
+lty_vec <- c(1, 2, 2, 2)
+for (i in seq_along(roc_comp_doris)) {
+  nm <- names(roc_comp_doris)[i]
+  r  <- roc_comp_doris[[nm]]
+  lines(1 - rev(r$specificities), rev(r$sensitivities),
+        col = colores_comp[nm], lwd = ifelse(i==1, 2.5, 1.5), lty = lty_vec[i])
+}
+legend("topright",
+       legend = paste0(names(roc_comp_doris), "  (AUC=",
+                       round(sapply(roc_comp_doris, function(r) as.numeric(pROC::auc(r))), 2), ")"),
+       col = colores_comp, lwd = c(2.5,1.5,1.5,1.5), lty = lty_vec, cex = 0.8, bty = "n")
+
+kable(
+  data.frame(Modelo = names(roc_comp_doris),
+             AUC    = round(sapply(roc_comp_doris, function(r) as.numeric(pROC::auc(r))), 3)),
+  caption   = "Tabla 8. AUC comparativo LASSO vs. biomarcadores individuales (Remisión DORIS).",
+  col.names = c("Modelo/Biomarcador", "AUC (aparente)"), align = "lc"
+) %>%
+  kable_styling(bootstrap_options = c("striped","hover","condensed"),
+                full_width = FALSE, font_size = 13) %>%
+  footnote(general = "AUC estimado sobre la muestra completa disponible para cada biomarcador.",
+           general_title = "Nota")
+```
+
+```{r roc-comparacion-estricta, fig.cap="Figura 8. Comparación de curvas ROC: LASSO multi-ómico vs. biomarcadores individuales (desenlace: Remisión estricta).", fig.width=7, fig.height=6}
+
+df_roc_comp_estricta <- df %>%
+  dplyr::select(id2, IFNapgml, c3, c4) %>%
+  filter(id2%in% rownames(X_estricta))
+
+ids_comun_estricta <- intersect(rownames(X_estricta), df_roc_comp_estricta$id2)
+Y_comp_estricta    <- droplevels(Y_estricta[ids_comun_estricta])
+idx_estricta       <- match(ids_comun_estricta, df_roc_comp_estricta$id2)
+
+roc_ifna_estricta <- pROC::roc(
+  response  = Y_comp_estricta,
+  predictor = df_roc_comp_estricta$IFNapgml[idx_estricta],
+  levels    = c("NoRemisionEstricta", "RemisionEstricta"),
+  direction = "<", quiet = TRUE
+)
+roc_c3_estricta <- pROC::roc(
+  response  = Y_comp_estricta,
+  predictor = df_roc_comp_estricta$c3[idx_estricta],
+  levels    = c("NoRemisionEstricta", "RemisionEstricta"),
+  direction = ">", quiet = TRUE
+)
+roc_c4_estricta <- pROC::roc(
+  response  = Y_comp_estricta,
+  predictor = df_roc_comp_estricta$c4[idx_estricta],
+  levels    = c("NoRemisionEstricta", "RemisionEstricta"),
+  direction = ">", quiet = TRUE
+)
+roc_lasso_estricta <- calcular_roc(modelo_estricta,
+                                   X_estricta[ids_comun_estricta, ],
+                                   droplevels(Y_estricta[ids_comun_estricta]),
+                                   "RemisionEstricta")
+
+roc_comp_estricta <- list(
+  "LASSO multi-ómico" = roc_lasso_estricta,
+  "IFN-α sérico"      = roc_ifna_estricta,
+  "C3"                = roc_c3_estricta,
+  "C4"                = roc_c4_estricta
+)
+
+plot(0, 0, type = "n", xlim = c(1, 0), ylim = c(0, 1),
+     xlab = "1 – Especificidad", ylab = "Sensibilidad",
+     main = "ROC: LASSO vs. biomarcadores individuales\n(Desenlace: Remisión estricta)")
+abline(a = 0, b = 1, lty = 2, col = "gray60")
+
+lty_vec <- c(1, 2, 2, 2)
+for (i in seq_along(roc_comp_estricta)) {
+  nm <- names(roc_comp_estricta)[i]
+  r  <- roc_comp_estricta[[nm]]
+  lines(1 - rev(r$specificities), rev(r$sensitivities),
+        col = colores_comp[nm],
+        lwd = ifelse(i == 1, 2.5, 1.5),
+        lty = lty_vec[i])
+}
+
+legend("topright",
+       legend = paste0(names(roc_comp_estricta), "  (AUC=",
+                       round(sapply(roc_comp_estricta,
+                                    function(r) as.numeric(pROC::auc(r))), 2), ")"),
+       col  = colores_comp,
+       lwd  = c(2.5, 1.5, 1.5, 1.5),
+       lty  = lty_vec,
+       cex  = 0.8, bty = "n")
+
+kable(
+  data.frame(
+    Modelo = names(roc_comp_estricta),
+    AUC    = round(sapply(roc_comp_estricta,
+                          function(r) as.numeric(pROC::auc(r))), 3)
+  ),
+  caption   = "Tabla 9. AUC comparativo LASSO vs. biomarcadores individuales (Remisión estricta).",
+  col.names = c("Modelo/Biomarcador", "AUC (aparente)"),
+  align     = "lc"
+) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = FALSE, font_size = 13) %>%
+  footnote(general      = "AUC estimado sobre la muestra completa disponible para cada biomarcador.",
+           general_title = "Nota")
+```
+
+---
+
+# Bloque 4. Síntesis comparativa de los cinco modelos
+
+```{r tabla-sintesis}
+
+tabla_sintesis <- data.frame(
+  Desenlace    = c("SLEDAI-2K","SLE-DAS","SLICC-SDI","DORIS","Remisión estricta"),
+  N_clase1     = c(
+    sum(Y_sledai   == "Remision"),
+    sum(Y_sledas   == "Remision"),
+    sum(Y_slicc    == "SinDano"),
+    sum(Y_doris    == "Cumple"),              
+    sum(Y_estricta == "RemisionEstricta")
+  ),
+  N_clase2     = c(
+    sum(Y_sledai   == "Activo"),
+    sum(Y_sledas   == "NoRemision"),
+    sum(Y_slicc    == "ConDano"),
+    sum(Y_doris    == "NoCumple"),
+    sum(Y_estricta == "NoRemisionEstricta")
+  ),
+  N_vars_lasso = c(
+    nrow(coef_df_sledai),
+    nrow(coef_df_sledas),
+    nrow(coef_df_slicc),
+    nrow(coef_df_doris),
+    nrow(coef_df_estricta)
+  ),
+  AUC_CV = round(c(
+    max(cv_sledai$cvm),
+    max(cv_sledas$cvm),
+    max(cv_slicc$cvm),
+    max(cv_doris$cvm),
+    max(cv_estricta$cvm)
+  ), 3),
+  AUC_aparente = round(c(
+    as.numeric(pROC::auc(roc_sledai)),
+    as.numeric(pROC::auc(roc_sledas)),
+    as.numeric(pROC::auc(roc_slicc)),
+    as.numeric(pROC::auc(roc_doris)),
+    as.numeric(pROC::auc(roc_estricta))
+  ), 3),
+  AUC_IFNa = round(c(
+    as.numeric(pROC::auc(roc_ifna_sledai)),
+    as.numeric(pROC::auc(roc_ifna_sledas)),
+    as.numeric(pROC::auc(roc_ifna_slicc)),
+    as.numeric(pROC::auc(roc_ifna_doris)),
+    as.numeric(pROC::auc(roc_ifna_estricta))
+  ), 3),
+  AUC_C3 = round(c(
+    as.numeric(pROC::auc(roc_c3_sledai)),
+    as.numeric(pROC::auc(roc_c3_sledas)),
+    as.numeric(pROC::auc(roc_c3_slicc)),
+    as.numeric(pROC::auc(roc_c3_doris)),
+    as.numeric(pROC::auc(roc_c3_estricta))
+  ), 3),
+  AUC_C4 = round(c(
+    as.numeric(pROC::auc(roc_c4_sledai)),
+    as.numeric(pROC::auc(roc_c4_sledas)),
+    as.numeric(pROC::auc(roc_c4_slicc)),
+    as.numeric(pROC::auc(roc_c4_doris)),
+    as.numeric(pROC::auc(roc_c4_estricta))
+  ), 3)
+)
+
+kable(tabla_sintesis,
+      caption   = "Tabla 6. Síntesis comparativa de los cinco modelos LASSO.",
+      col.names = c("Desenlace", "N clase 1", "N clase 2",
+                    "Vars. LASSO", "AUC CV", "AUC LASSO",
+                    "AUC IFN-α", "AUC C3", "AUC C4"),
+      align     = "lcccccccc") %>%
+  kable_styling(bootstrap_options = c("striped","hover","condensed"),
+                full_width = TRUE, font_size = 12) %>%
+  add_header_above(c(" " = 4,
+                     "LASSO multi-ómico" = 2,
+                     "Biomarcadores individuales" = 3)) %>%
+  footnote(
+    general = paste0(
+      "Clase 1 = evento positivo (remisión / sin daño). ",
+      "Vars. LASSO = variables con coeficiente no nulo (λ=1SE). ",
+      "AUC CV = AUC máximo en validación cruzada 10-fold. ",
+      "AUC LASSO = AUC aparente sobre muestra completa. ",
+      "AUC IFN-α / C3 / C4 = AUC aparente de cada biomarcador individual."),
+    general_title = "Nota"
+  )
+```
+

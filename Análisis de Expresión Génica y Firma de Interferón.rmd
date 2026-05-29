@@ -1,0 +1,1556 @@
+---
+title: "Análisis de Expresión Génica y Firma de Interferón"
+author: "Fuensanta Bernal Gómez"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    self_contained: true
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    toc_depth: 3
+    number_sections: true
+    css: estilos.css
+    theme: flatly
+    highlight: tango
+    df_print: paged
+    code_folding: show
+    fig_width: 8
+    fig_height: 5
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  fig.path = "figuras/Análisis de Expresión Génica y Firma de Interfe/",      
+                              # carpeta donde se guardarán
+  dev = "png",                # formato: png, pdf, svg, etc.
+  dpi = 300,                  # resolución
+  fig.width = 9,              # ancho en pulgadas
+  fig.height = 6,             # alto en pulgadas
+  bg = "white"                # fondo blanco
+)
+```
+
+# Introducción
+
+Este documento describe el procesamiento de los datos de expresión génica obtenidos
+mediante la plataforma NanoString nCounter y el cálculo del índice de interferón tipo I
+(IFN-score) en una cohorte de 251 pacientes con Lupus Eritematoso Sistémico (LES) y
+24 controles sanos, con el objetivo de implementar un pipeline bioinformático completo
+de control de calidad, normalización y caracterización transcriptómica de los subgrupos
+IFN-high e IFN-low.
+
+La firma transcriptómica de interferón tipo I —definida por la sobreexpresión coordinada
+de genes estimulados por interferón (ISGs) en sangre periférica— constituye uno de los
+rasgos moleculares más reproducibles del LES, presente en aproximadamente el 50–75% de
+los pacientes [@Baechler2003; @Bennett2003; @Chasset2022]. Su cuantificación mediante
+plataformas de expresión génica multiplexada como NanoString nCounter permite derivar
+índices compuestos (IFN-scores) que capturan de forma robusta el grado de activación
+de esta vía, con alta reproducibilidad entre laboratorios y sin necesidad de
+amplificación previa [@NanoString2017].
+
+El análisis se estructura en los siguientes bloques:
+
+- **Bloque 1 – Definición de genes**: identificación de los 72 ISGs del panel,
+  los 4 genes clásicos de validación (IFI27, IFI44, IFI44L, RSAD2), los 5 genes
+  housekeeping (ALAS1, G6PD, HPRT1, POLR2A, TBP) y las sondas de control
+  interno NEG_A–F y POS_A–F.
+- **Bloque 2 – Control de calidad**: evaluación de las sondas de control negativo
+  (estimación del ruido de fondo), controles positivos (linealidad del ensayo) y
+  genes housekeeping (coeficiente de variación CV%), con identificación y exclusión
+  de muestras con factores de normalización fuera del rango aceptable.
+- **Bloque 3 – Normalización**: corrección de background mediante *background
+  thresholding* (umbral = media + 2SD de sondas negativas), normalización técnica
+  por controles positivos, normalización biológica por genes housekeeping y
+  transformación logarítmica en base 2, siguiendo las directrices de NanoString
+  Technologies [@NanoString2017].
+- **Bloque 4 – Cálculo del IFN-score**: derivación del IFN-score principal
+  (mediana de la expresión relativa de los 72 ISGs respecto a la mediana de los
+  controles sanos) y del IFN-score de validación (4 genes clásicos), ampliamente  
+  utilizado en la literatura [@DemersMathieu2023; @Chasset2022], para comprobar la   
+  concordancia con el score principal basado en los 72 ISGs del panel.
+- **Bloque 5 – Clasificación IFN-high / IFN-low**: definición del umbral de
+  clasificación (media + 2DE de los controles sanos) con análisis de sensibilidad
+  comparando cuatro criterios alternativos y estimación del intervalo de confianza
+  al 95% mediante *bootstrapping*.
+- **Bloque 6 – Validación del IFN-score**: evaluación de la normalidad
+  (Shapiro-Wilk, Q-Q, histograma), concordancia entre el score de 72 genes y el
+  de 4 genes clásicos (correlación de Spearman) y concordancia de las
+  clasificaciones dicotómicas (kappa de Cohen).
+- **Bloque 7 – Análisis descriptivo**: comparación del IFN-score entre pacientes
+  con LES y controles sanos mediante boxplot y test de Wilcoxon. Dado el reducido
+  tamaño del grupo control (n = 24), su uso queda restringido al establecimiento
+  del umbral de clasificación y al cálculo de la expresión de referencia; no se
+  realiza comparación formal gen a gen entre grupos.
+- **Bloque 8 – Caracterización transcriptómica IFN-high vs. IFN-low**: análisis
+  de expresión diferencial gen a gen (Wilcoxon + FDR Benjamini-Hochberg, FDR < 0,05)
+  con visualización mediante volcano plot, análisis de componentes principales (PCA)
+  para identificar la estructura de variabilidad transcriptómica, y clustering
+  jerárquico (ward.D2) con heatmap para visualizar módulos de co-expresión génica.
+
+---
+
+# Carga de paquetes
+
+```{r paquetes}
+paquetes <- c(
+  "dplyr", "tidyr", "ggplot2", "knitr", "kableExtra",
+  "ggpubr", "rstatix", "coin", "ggrepel", "pheatmap",
+  "tibble", "forcats", "scales", "irr", "purrr","pROC"
+)
+
+for (pkg in paquetes) {
+  if (!requireNamespace(pkg, quietly = TRUE)) install.packages(pkg)
+  library(pkg, character.only = TRUE)
+}
+```
+
+---
+
+# Paleta de colores 
+
+```{r paleta_colores}
+# Grupos principales (Control vs. LES)
+col_control      <- "#74c476"   # verde medio  (Control - fill)
+col_control_dark <- "#238b45"   # verde oscuro (Control - borde/puntos)
+col_les          <- "#fb6a4a"   # salmón       (LES - fill)
+col_les_dark     <- "#cb181d"   # rojo oscuro  (LES - borde/puntos)
+
+# Subgrupos IFN (dentro de pacientes LES)
+col_high <- "#cb181d"   # rojo oscuro (IFN-high)
+col_low  <- "#fc9272"   # rojo claro  (IFN-low)
+```
+
+---
+
+# Importación del dataset
+
+Se importa el objeto `DataSet_scores.rds` generado en el documento anterior (*Preparación y Cálculo de Índices Clínicos*), que contiene las variables clínicas, analíticas, los índices calculados y la expresión génica NanoString.
+
+```{r importacion}
+DataSet_genes <- readRDS("DataSet_scores.rds")
+
+cat("Dimensiones:", nrow(DataSet_genes), "filas x", ncol(DataSet_genes), "columnas\n")
+cat("Pacientes LES:", sum(DataSet_genes$les == "LES"), "\n")
+cat("Controles sanos:", sum(DataSet_genes$les == "Control"), "\n")
+```
+
+---
+
+# Preparación de la matriz de expresión génica
+
+Se definen las sondas de control NanoString, los genes *housekeeping* y los genes ISG incluidos en el panel, tal como fueron seleccionados en el documento anterior.
+
+```{r preparacion_matriz}
+# Genes ISG (72 genes del panel completo)
+genes_isg <- c(
+  "BDCA1", "BST2", "CEACAM1", "CMPK2", "CXCL10", "CXCL9", "DDX60",
+  "DNAJA1", "EIFAK2", "EPSTI1", "GBP1", "GBP4", "GBP5", "HERC5", "HERC6",
+  "IFI16", "IFI27", "IFI35", "IFI44", "IFI44L", "IFI6", "IFIH1", "IFIT1",
+  "IFIT2", "IFIT3", "IFIT5", "IFITM1", "IFITM3", "IL1RN", "IL6", "IRF1",
+  "IRF7", "ISG15", "ISG20", "LAMP3", "LGALS3BP", "LY6E", "MX1", "MX2",
+  "MYD88", "NC0A7", "NT5C3B", "OAS1", "OAS2", "OAS3", "OASL", "PARP12",
+  "PARP9", "PHF11", "PLSCR1", "PRKR", "PSMB9", "RSAD2", "RTP4", "SAMD9L",
+  "SERPING1", "SIGLEC1", "SOCS1", "SP100", "SP140", "SPATS2L", "STAT1",
+  "TAP1", "TNFAIP6", "TNFSF10", "TRIM38", "TYK2", "UB2L6", "UNC93B1",
+  "USP18", "XAF1", "ZBP1"
+)
+
+# Housekeeping
+genes_hk <- c("alas1", "g6pd", "hprt1", "polr2a", "tbp")
+
+# Sondas de control NanoString
+cols_neg   <- intersect(c("NEG_A","NEG_B","NEG_C","NEG_D","NEG_E","NEG_F"), names(DataSet_genes))
+cols_pos   <- intersect(c("POS_A","POS_B","POS_C","POS_D","POS_E","POS_F"), names(DataSet_genes))
+cols_hk    <- intersect(genes_hk,  names(DataSet_genes))
+cols_genes <- intersect(genes_isg, names(DataSet_genes))
+
+cat("Sondas negativas disponibles:",   length(cols_neg),   "\n")
+cat("Sondas positivas disponibles:",   length(cols_pos),   "\n")
+cat("Genes housekeeping disponibles:", length(cols_hk),    "\n")
+cat("Genes ISG disponibles:",          length(cols_genes), "\n")
+```
+
+---
+
+# Control de calidad del ensayo NanoString
+
+El control de calidad (QC) del ensayo NanoString es un paso previo obligatorio al análisis de expresión, cuyo objetivo es identificar muestras con eficiencia de hibridación reducida o datos comprometidos [@NanoString2017]. Se evalúan tres tipos de sondas internas: los controles negativos, que permiten estimar el ruido de fondo; los controles positivos, que valoran la linealidad y eficiencia del ensayo; y los genes *housekeeping*, cuya estabilidad determina la idoneidad de la normalización biológica.
+
+## Evaluación de controles negativos
+
+Las sondas negativas (NEG_A a NEG_F) están diseñadas contra secuencias de ARN de control (ERCC) ausentes en muestras biológicas, por lo que sus cuentas reflejan la unión inespecífica del ensayo. Se utilizan para fijar el umbral de *background* [@NanoString2017].
+
+```{r, QC_controles_negativos}
+# ── Datos controles negativos ──────────────────────────────────────────────
+controles_neg <- data.frame(
+  Sonda   = factor(c("NEG_A","NEG_B","NEG_C","NEG_D","NEG_E","NEG_F"),
+                   levels = c("NEG_A","NEG_B","NEG_C","NEG_D","NEG_E","NEG_F")),
+  Media   = c(15.9, 12.9, 16.6, 6.6, 26.4, 11.1),
+  DE      = c(8.2,  9.0,  14.0, 5.0, 12.9, 6.8)
+)
+
+col_barras <- "#b5d5a8"
+col_media  <- "#5a9e4a"
+
+ggplot(controles_neg, aes(x = Sonda, y = Media)) +
+  geom_col(fill = col_barras, alpha = 0.85,
+           color = "white", linewidth = 0.4, width = 0.6) +
+  geom_errorbar(aes(ymin = pmax(Media - DE, 0), ymax = Media + DE),
+                width = 0.2, color = "grey55", linewidth = 0.7) +
+  geom_hline(yintercept = mean(controles_neg$Media),
+             linetype = "dashed", color = col_media, linewidth = 0.9) +
+  annotate("text",
+           x = 0.55, y = mean(controles_neg$Media) + 1.8,
+           label = paste0(""),
+           hjust = 0, size = 3.5, color = col_media, fontface = "italic") +
+  # ← números dentro de la barra, con fondo blanco semitransparente
+  geom_label(aes(label = round(Media, 1)),
+             vjust = 1.4,                      # dentro de la barra
+             size  = 3.8,
+             color = "grey20",
+             fill  = "white",
+             label.size = 0,                   # sin borde del label
+             alpha = 0.75) +
+  scale_y_continuous(
+    limits = c(0, 50),
+    expand = expansion(mult = c(0, 0.05))
+  ) +
+  labs(
+    title    = "Recuentos de los controles negativos NanoString",
+    subtitle = "Niveles bajos y homogéneos entre sondas NEG_A–NEG_F (ruido de fondo del ensayo)\nBarras de error: media ± DE",
+    x        = "Sonda de control negativo",
+    y        = "Recuentos medios (cuentas brutas)"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title         = element_text(face = "bold", size = 13, hjust = 0.5),
+    plot.subtitle      = element_text(color = "grey50", size = 9.5, hjust = 0.5),
+    panel.grid.minor   = element_blank(),
+    panel.grid.major.x = element_blank(),
+    axis.line.x        = element_line(color = "grey80"),
+    axis.line.y        = element_line(color = "grey80")
+  )
+```
+
+## Evaluación de controles positivos
+
+Los seis controles positivos (POS_A a POS_F) son sondas de ADN sintético con concentraciones que aumentan linealmente de 0,125 fM (POS_F) a 128 fM (POS_A). Su linealidad se evalúa mediante regresión entre la concentración conocida y los recuentos observados (R² ≥ 0,95) [@NanoString2017]. 
+
+```{r QC_controles_positivos}
+pos_mat <- DataSet_genes[, cols_pos, drop = FALSE]
+
+pos_summary <- pos_mat %>%
+  summarise(across(everything(), list(
+    Media = ~round(mean(.x, na.rm = TRUE), 1),
+    SD    = ~round(sd(.x, na.rm = TRUE), 1),
+    Min   = ~round(min(.x, na.rm = TRUE), 1),
+    Max   = ~round(max(.x, na.rm = TRUE), 1)
+  ))) %>%
+  pivot_longer(
+    everything(),
+    names_to = c("Sonda", "Estadistico"),
+    names_pattern = "(.+)_(Media|SD|Min|Max)"
+  ) %>%
+  pivot_wider(names_from = "Estadistico", values_from = "value")
+
+pos_summary %>%
+  kable(
+    caption = "Tabla. Estadísticos descriptivos de los controles positivos (cuentas brutas)",
+    align = "lcccc"
+  ) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+```{r QC_controles_positivos linealidad}
+# Datos
+controles_pos <- data.frame(
+  Sonda         = factor(c("POS_A","POS_B","POS_C","POS_D","POS_E","POS_F"),
+                         levels = c("POS_A","POS_B","POS_C","POS_D","POS_E","POS_F")),
+  Concentracion = c(128, 32, 8, 2, 0.5, 0.125),   # fM conocida
+  Media         = c(62075.0, 16116.0, 5355.3, 1526.1, 408.6, 99.2),
+  DE            = c(26892.9, 7680.4, 2316.0, 436.5, 121.0, 24.3),
+  Min           = c(2031, 509, 183, 714, 168, 48),
+  Max           = c(135843, 36166, 11039, 2747, 687, 172)
+)
+
+col_linea  <- "#89c4e1"   # azul pastel
+col_puntos <- "#f4a6a0"   # salmón pastel
+
+ggplot(controles_pos, aes(x = Sonda, y = Media, group = 1)) +
+  geom_ribbon(aes(ymin = Media - DE, ymax = Media + DE),
+              fill = col_linea, alpha = 0.25) +
+  geom_line(color = col_linea, linewidth = 1.2) +
+  geom_errorbar(aes(ymin = Min, ymax = Max),
+                width = 0.2, color = "grey60", linewidth = 0.6) +
+  geom_point(color = col_puntos, size = 4,
+             shape = 21, fill = col_puntos, stroke = 0.8) +
+  geom_text(aes(label = scales::comma(Media, big.mark = ".", decimal.mark = ",")),
+            vjust = -1.3, size = 3.5, color = "grey30") +
+  scale_y_log10(labels = scales::comma_format(big.mark = ".", decimal.mark = ",")) +
+  labs(
+    title    = "Linealidad de los controles positivos NanoString",
+    subtitle = "Descenso escalonado de los recuentos medios de POS_A a POS_F (escala logarítmica)\nBarras: rango observado (mín–máx); banda: media ± DE",
+    x        = "Sonda de control positivo",
+    y        = "Recuentos medios (escala log)"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title    = element_text(face = "bold", size = 13, hjust = 0.5),
+    plot.subtitle = element_text(color = "grey50", size = 9.5, hjust = 0.5),
+    panel.grid.minor  = element_blank(),
+    axis.line.x       = element_line(color = "grey80"),
+    axis.line.y       = element_line(color = "grey80")
+  )
+```
+
+## Evaluación de genes housekeeping
+
+Los genes *housekeeping* deben mostrar una expresión estable entre muestras. Se evalúa su coeficiente de variación (CV%), y se excluyen aquellos con alta variabilidad o expresión próxima al *background*, ya que comprometerían la normalización biológica [@NanoString2017]
+
+```{r qc_housekeeping}
+hk_mat <- DataSet_genes[, cols_hk, drop = FALSE]
+
+hk_cv <- hk_mat %>%
+  summarise(across(everything(), list(
+    Media = ~round(mean(.x, na.rm = TRUE), 1),
+    SD    = ~round(sd(.x, na.rm = TRUE), 1),
+    CV    = ~round(100 * sd(.x, na.rm = TRUE) / mean(.x, na.rm = TRUE), 1)
+  ))) %>%
+  pivot_longer(
+    everything(),
+    names_to = c("Gen", "Estadistico"),
+    names_pattern = "(.+)_(Media|SD|CV)"
+  ) %>%
+  pivot_wider(names_from = "Estadistico", values_from = "value") %>%
+  arrange(CV)
+
+hk_cv %>%
+  kable(
+    caption = "Tabla. Coeficiente de variación (CV%) de los genes housekeeping",
+    align = "lccc"
+  ) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+
+---
+
+# Normalización de la expresión génica
+
+La normalización elimina las fuentes de variabilidad técnica para que la varianza residual pueda atribuirse a la biología subyacente [@NanoString2017]. Se aplica un proceso estándar de dos etapas: primero la corrección de *background*, seguida de la normalización técnica por controles positivos y la normalización biológica por genes *housekeeping*.
+
+## Corrección de background
+
+NanoString recomienda el *background thresholding* para estudios de expresión génica, utilizando habitualmente la media + 2 SD de las sondas negativas como umbral, de modo que todos los recuentos inferiores a dicho umbral se igualan a él [@NanoString2017].
+
+```{r background}
+geom_mean <- function(x) exp(mean(log(x[x > 0]), na.rm = TRUE))
+
+neg_raw   <- as.matrix(DataSet_genes[, cols_neg, drop = FALSE])
+umbral_bg <- apply(neg_raw, 1, function(x) mean(x, na.rm = TRUE) + 2 * sd(x, na.rm = TRUE))
+expr_mat  <- as.matrix(DataSet_genes[, cols_genes, drop = FALSE])
+
+# Contar recuentos por debajo del umbral ANTES de corregir
+recuentos_bajo_umbral <- sum(
+  sapply(seq_len(nrow(expr_mat)), function(i) {
+    sum(expr_mat[i, ] < umbral_bg[i], na.rm = TRUE)
+  })
+)
+total_recuentos <- nrow(expr_mat) * ncol(expr_mat)
+
+cat("Recuentos por debajo del umbral de background:", recuentos_bajo_umbral,
+    "(", round(100 * recuentos_bajo_umbral / total_recuentos, 2), "% del total )\n")
+
+# Aplicar corrección
+for (i in seq_len(nrow(expr_mat))) {
+  expr_mat[i, expr_mat[i, ] < umbral_bg[i]] <- umbral_bg[i]
+}
+
+cat("Corrección de background aplicada.\n")
+cat("Umbral medio de background:", round(mean(umbral_bg), 2), "cuentas\n")
+cat("Umbral mínimo:", round(min(umbral_bg), 2), "| máximo:", round(max(umbral_bg), 2), "\n")
+```
+
+## Normalización técnica mediante controles positivos
+
+La normalización por controles positivos corrige las fuentes de variabilidad asociadas a la plataforma (eficiencia de hibridación, purificación, condiciones del escáner). Se calcula la media geométrica de POS_A a POS_E para cada muestra y se divide la media global por la individual para obtener el factor de corrección. Factores fuera del rango 0,3–3 se consideran indicativos de posibles problemas de calidad [@NanoString2017].
+
+```{r norm_positivos}
+cols_pos_norm <- setdiff(cols_pos, "POS_F")
+
+pos_raw <- as.matrix(DataSet_genes[, cols_pos_norm, drop = FALSE])
+gm_pos_muestra <- apply(pos_raw, 1, geom_mean)
+gm_pos_global <- mean(gm_pos_muestra, na.rm = TRUE)
+factor_pos <- gm_pos_global / gm_pos_muestra
+
+expr_mat_pos <- sweep(expr_mat, 1, factor_pos, FUN = "*")
+
+cat("Rango factores POS:", round(min(factor_pos), 3), "-", round(max(factor_pos), 3), "\n")
+cat("Muestras con factor fuera de rango (>3 o <0.3):",
+    sum(factor_pos > 3 | factor_pos < 0.3, na.rm = TRUE), "\n")
+```
+
+## Normalización biológica mediante genes housekeeping
+
+La normalización por genes *housekeeping* corrige la variabilidad debida al input de ARN entre muestras. Al igual que para la normalización por controles positivos, se calcula la media geométrica de los *housekeeping* para cada muestra y se divide la media global por la individual para obtener el factor de corrección. Factores fuera del rango 0,1–10 requieren una revisión cuidadosa de las muestras implicadas [@NanoString2017].
+
+```{r QC_housekeeping}
+hk_raw <- sweep(as.matrix(DataSet_genes[, cols_hk, drop = FALSE]), 1, factor_pos, FUN = "*")
+gm_hk_muestra <- apply(hk_raw, 1, geom_mean)
+gm_hk_global <- mean(gm_hk_muestra, na.rm = TRUE)
+factor_hk <- gm_hk_global / gm_hk_muestra
+
+expr_mat_norm <- sweep(expr_mat_pos, 1, factor_hk, FUN = "*")
+
+cat("Rango factores HK:", round(min(factor_hk), 3), "-", round(max(factor_hk), 3), "\n")
+cat("Muestras con factor fuera de rango (>10 o <0.1):",
+    sum(factor_hk > 10 | factor_hk < 0.1, na.rm = TRUE), "\n")
+```
+```{r}
+# Identificar la muestra problemática
+muestra_flag_hk <- which(factor_hk > 10 | factor_hk < 0.1)
+
+# Tabla: muestra problemática
+data.frame(
+  ID     = DataSet_genes$id2[muestra_flag_hk],
+  Grupo  = DataSet_genes$les[muestra_flag_hk],
+  Factor_HK = round(factor_hk[muestra_flag_hk], 3)
+) %>%
+  kable(
+    caption = "Tabla. Muestra excluida por factor de normalización HK fuera de rango (> 10)",
+    align   = "lcc"
+  ) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+
+# Tabla: recuentos HK de la muestra problemática vs. media global
+hk_comparacion <- data.frame(
+  Gen              = colnames(hk_raw),
+  Muestra          = round(hk_raw[muestra_flag_hk, ], 1),
+  Media_global     = round(colMeans(hk_raw, na.rm = TRUE), 1)
+)
+
+hk_comparacion %>%
+  rename(
+    `Gen housekeeping`  = Gen,
+    `Recuentos muestra` = Muestra,
+    `Media global`      = Media_global
+  ) %>%
+  kable(
+    caption = "Tabla. Recuentos de genes housekeeping de la muestra excluida vs. media global",
+    align   = "lcc"
+  ) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+```{r QC_housekeeping_LES136}
+# Recuentos housekeeping LES136 vs. media global
+
+# Datos
+hk_comparacion <- data.frame(
+  Gen            = c("ALAS1", "G6PD", "HPRT1", "POLR2A", "TBP"),
+  Muestra_LES136 = c(50.9, 200.7, 60.2, 131.2, 54.0),
+  Media_global   = c(704.5, 2106.8, 735.6, 1765.4, 532.0)
+)
+
+hk_long <- hk_comparacion |>
+  pivot_longer(
+    cols      = c(Muestra_LES136, Media_global),
+    names_to  = "Grupo",
+    values_to = "Recuentos"
+  ) |>
+  mutate(
+    Grupo = factor(Grupo,
+                   levels = c("Media_global", "Muestra_LES136"),
+                   labels = c("Media global (n = 275)",
+                              "LES136 (excluida · Factor HK = 11,67)"))
+  )
+
+# Colores 
+col_media  <- "#89c4e1"   # azul pastel
+col_les136 <- "#f4a6a0"   # rojo/salmón pastel
+
+# Figura
+ggplot(hk_long, aes(x = Gen, y = Recuentos, fill = Grupo)) +
+  geom_col(
+    position  = position_dodge(width = 0.7),
+    width     = 0.65,
+    color     = "white",
+    linewidth = 0.4
+  ) +
+  scale_fill_manual(values = c(
+    "Media global (n = 275)"                = col_media,
+    "LES136 (excluida · Factor HK = 11,67)" = col_les136
+  )) +
+  scale_y_continuous(
+    labels = scales::comma_format(big.mark = "."),
+    expand = expansion(mult = c(0, 0.12))
+  ) +
+  labs(
+    title    = "Control de calidad NanoString: genes housekeeping",
+    subtitle = "Recuentos de LES136 frente a la media global de la cohorte",
+    x        = NULL,
+    y        = "Recuentos (cuentas brutas)",
+    fill     = NULL
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title           = element_text(face = "bold", size = 13,
+                                        hjust = 0.5),        # ← centrado
+    plot.subtitle        = element_text(color = "grey50", size = 10,
+                                        hjust = 0.5),        # ← centrado
+    legend.position      = "top",
+    legend.justification = "center",                         # ← centrado
+    panel.grid.minor     = element_blank(),
+    panel.grid.major.x   = element_blank(),
+    axis.line.x          = element_line(color = "grey80"),
+    axis.line.y          = element_line(color = "grey80"),
+    axis.text.x          = element_text(size = 12)
+  )
+```
+
+```{r}
+# Exclusión sincronizada. Lo más probable es que sea una muestra con baja concentración o degradación de ARN
+DataSet_genes  <- DataSet_genes[-muestra_flag_hk, ]
+expr_mat_norm  <- expr_mat_norm[-muestra_flag_hk, ]
+
+cat("Muestras tras exclusión:", nrow(DataSet_genes), "\n")
+```
+
+## Transformación log2 de los datos normalizados
+
+La transformación log2 estabiliza la varianza y permite interpretar las diferencias de expresión como *fold-changes* aditivos [@NanoString2017]. Todos los valores inferiores a 1 se fijan en 1 previamente para evitar valores negativos o indefinidos en la escala logarítmica.
+
+
+```{r log2}
+expr_mat_norm[expr_mat_norm < 1] <- 1
+expr_log2 <- log2(expr_mat_norm)
+
+cat("Transformación log2 completada.\n")
+cat("Rango expresión normalizada (log2):",
+    round(min(expr_log2, na.rm = TRUE), 2), "-",
+    round(max(expr_log2, na.rm = TRUE), 2), "\n")
+```
+
+---
+
+# Selección de genes para la firma de interferón
+
+Se definen dos conjuntos de genes para el cálculo del IFN-score. El **score principal** utiliza los 72 ISGs del panel completo, maximizando la cobertura de la vía de interferón tipo I. Como **análisis de validación**, se calcula adicionalmente el IFN-score clásico de 4 genes (IFI27, IFI44, IFI44L, RSAD2), los más frecuentemente empleados en la literatura, para comprobar la concordancia entre ambos scores [@DemersMathieu2023; @Chasset2022].
+
+```{r genes_firma}
+# Score principal: 72 ISGs del panel
+genes_ifn72 <- cols_genes   # todos los ISG disponibles tras preparacion_matriz
+
+# Score de validación: 4 genes clásicos
+genes_ifn4     <- c("IFI27", "IFI44", "IFI44L", "RSAD2")
+genes_ifn4_ok  <- intersect(genes_ifn4, colnames(expr_log2))
+
+cat("Genes IFN-score principal (72 ISGs):", length(genes_ifn72), "\n")
+cat("Genes IFN-score validación (4 genes):", length(genes_ifn4_ok), "->",
+    paste(genes_ifn4_ok, collapse = ", "), "\n")
+```
+
+---
+
+# Cálculo del índice de interferón (IFN-score)
+
+El IFN-score se calcula como la mediana de la expresión relativa (en escala log2) de los genes ISG seleccionados respecto a la mediana de los controles sanos, siguiendo el enfoque descrito por Chasset et al. [@Chasset2022]. Este método es equivalente a un log2 fold-change mediano respecto al grupo de referencia [@NanoString2017].
+
+## IFN-score principal (72 genes ISG)
+
+```{r ifn_score_72}
+controles_idx <- which(DataSet_genes$les == "Control")
+
+# Expresión relativa respecto a la mediana de controles
+mediana_ctrl_72 <- apply(
+  expr_log2[controles_idx, genes_ifn72, drop = FALSE],
+  2, median, na.rm = TRUE
+)
+
+expr_rel_72 <- sweep(
+  expr_log2[, genes_ifn72, drop = FALSE],
+  2, mediana_ctrl_72, FUN = "-"
+)
+
+# Asignar ID de sujeto como rownames
+rownames(expr_rel_72) <- DataSet_genes$id2
+
+DataSet_genes$ifnscore72 <- apply(expr_rel_72, 1, median, na.rm = TRUE)
+
+DataSet_genes %>%
+  group_by(les) %>%
+  summarise(
+    N       = n(),
+    Media   = round(mean(ifnscore72, na.rm = TRUE), 3),
+    SD      = round(sd(ifnscore72, na.rm = TRUE), 3),
+    Mediana = round(median(ifnscore72, na.rm = TRUE), 3),
+    P25     = round(quantile(ifnscore72, 0.25, na.rm = TRUE), 3),
+    P75     = round(quantile(ifnscore72, 0.75, na.rm = TRUE), 3)
+  ) %>%
+  kable(
+    caption = "Tabla. IFN-score principal (72 genes ISG) por grupo",
+    align   = "lcccccc"
+  ) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+
+## IFN-score de validación (4 genes clásicos)
+
+Como análisis de validación, se calcula el IFN-score clásico de 4 genes (IFI27, IFI44, IFI44L, RSAD2) para comprobar la concordancia con el score principal [@DemersMathieu2023; @Chasset2022].
+
+```{r ifn_score_4}
+mediana_ctrl_4 <- apply(
+  expr_log2[controles_idx, genes_ifn4_ok, drop = FALSE],
+  2, median, na.rm = TRUE
+)
+
+expr_rel4 <- sweep(
+  expr_log2[, genes_ifn4_ok, drop = FALSE],
+  2, mediana_ctrl_4, FUN = "-"
+)
+
+DataSet_genes$ifnscore4 <- apply(expr_rel4, 1, median, na.rm = TRUE)
+
+DataSet_genes %>%
+  group_by(les) %>%
+  summarise(
+    N       = n(),
+    Media   = round(mean(ifnscore4, na.rm = TRUE), 3),
+    SD      = round(sd(ifnscore4, na.rm = TRUE), 3),
+    Mediana = round(median(ifnscore4, na.rm = TRUE), 3),
+    P25     = round(quantile(ifnscore4, 0.25, na.rm = TRUE), 3),
+    P75     = round(quantile(ifnscore4, 0.75, na.rm = TRUE), 3)
+  ) %>%
+  kable(
+    caption = "Tabla. IFN-score de validación (4 genes clásicos) por grupo",
+    align   = "lcccccc"
+  ) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+
+## Determinación del punto de corte a partir de controles sanos. Clasificación IFN-high/IFN-low
+
+El punto de corte se fija en la media + 2 SD del IFN-score principal (72 genes) de los controles sanos, criterio consistente con el empleado en estudios previos [@Chasset2022; @Mai2021; @DemersMathieu2023]. Los pacientes se clasifican en IFN-high (score ≥ punto de corte) e IFN-low (score < punto de corte).
+
+```{r punto_corte}
+stats_ctrl <- DataSet_genes %>%
+  filter(les == "Control") %>%
+  summarise(
+    media = mean(ifnscore72, na.rm = TRUE),
+    sd    = sd(ifnscore72, na.rm = TRUE)
+  )
+
+corte_ifn72 <- stats_ctrl$media + 2 * stats_ctrl$sd
+
+DataSet_genes$ifn_grupo <- ifelse(
+  DataSet_genes$ifnscore72 >= corte_ifn72,
+  "IFN-high", "IFN-low"
+)
+
+cat("Punto de corte IFN-score 72 genes:", round(corte_ifn72, 3), "\n\n")
+
+DataSet_genes %>%
+  filter(les == "LES") %>%
+  count(ifn_grupo) %>%
+  mutate(`%` = paste0(round(n / sum(n) * 100, 1), "%")) %>%
+  kable(
+    caption = "Tabla. Clasificación de pacientes LES según IFN-score principal (72 genes)",
+    align   = "lcc"
+  ) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+
+Para verificar que el IFN-score principal (72 ISGs) es representativo de la firma del interferón, se evaluó su concordancia con el IFN-score clásico de 4 genes (IFI27, IFI44, IFI44L, RSAD2), ampliamente validado en la literatura [@DemersMathieu2023; @Chasset2022]. Se calculó la correlación de Spearman entre ambos scores en los pacientes LES y se evaluó la concordancia de la clasificación IFN-high/IFN-low mediante la kappa de Cohen, aplicando el mismo criterio de punto de corte (media + 2 SD de los controles sanos) a cada score de forma independiente.
+
+## Análisis de sensibilidad del punto de corte
+
+Con el fin de evaluar la robustez de la clasificación IFN-high/IFN-low, 
+se comparó el criterio principal (media + 2SD de los controles sanos) 
+frente a criterios alternativos descritos en la literatura: media + 1.5SD, 
+percentil 95 y percentil 90 de los controles. Para cada umbral se calculó 
+el porcentaje de pacientes LES clasificados como IFN-high. Adicionalmente, 
+se estimó la precisión del punto de corte mediante bootstrapping 
+(n = 1.000 remuestras con reemplazamiento) para obtener un intervalo 
+de confianza al 95%.
+
+```{r sensibilidad_puntocorte, fig.width=7, fig.height=4}
+# Calcular puntos de corte alternativos
+statsctrl <- DataSet_genes %>%
+  filter(les == "Control") %>%
+  summarise(
+    media = mean(ifnscore72, na.rm = TRUE),
+    sd    = sd(ifnscore72, na.rm = TRUE)
+  )
+
+ctrl_scores <- DataSet_genes %>%
+  filter(les == "Control") %>%
+  pull(ifnscore72)
+
+cortes <- tibble(
+  Criterio = c(
+    "Media + 2SD (principal)",
+    "Media + 1.5SD",
+    "Percentil 95",
+    "Percentil 90"
+  ),
+  Punto_de_corte = c(
+    statsctrl$media + 2.0 * statsctrl$sd,
+    statsctrl$media + 1.5 * statsctrl$sd,
+    quantile(ctrl_scores, 0.95, na.rm = TRUE),
+    quantile(ctrl_scores, 0.90, na.rm = TRUE)
+  )
+)
+```
+
+```{r sensibilidad_tabla, fig.width=7, fig.height=4}
+# Clasificar pacientes LES con cada criterio
+les_df <- DataSet_genes %>% filter(les == "LES")
+
+for (i in seq_len(nrow(cortes))) {
+  varname <- paste0("ifngrupo_", i)
+  les_df[[varname]] <- ifelse(
+    les_df$ifnscore72 >= cortes$Punto_de_corte[i],
+    "IFN-high", "IFN-low"
+  )
+}
+
+# 3. Tabla comparativa
+tabla_sensibilidad <- cortes %>%
+  mutate(
+    Punto_de_corte = round(Punto_de_corte, 3),
+    N_IFN_high = c(
+      sum(les_df$ifngrupo_1 == "IFN-high"),
+      sum(les_df$ifngrupo_2 == "IFN-high"),
+      sum(les_df$ifngrupo_3 == "IFN-high"),
+      sum(les_df$ifngrupo_4 == "IFN-high")
+    ),
+    Pct_IFN_high = round(N_IFN_high / nrow(les_df) * 100, 1)
+  ) %>%
+  rename(
+    `Criterio`       = Criterio,
+    `Punto de corte` = Punto_de_corte,
+    `N IFN-high`     = N_IFN_high,
+    `% IFN-high`     = Pct_IFN_high
+  )
+
+tabla_sensibilidad %>%
+  kable(
+    caption = "Tabla. Análisis de sensibilidad: clasificación IFN-high según criterios alternativos de punto de corte",
+    align   = "lccc"
+  ) %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover"),
+    full_width = FALSE
+  ) %>%
+  row_spec(1, bold = TRUE, background = "#f0f7fb")  # resalta criterio principal
+```
+
+El porcentaje de pacientes clasificados como IFN-high oscila entre el 31.1% (p95) y el 51.8% (p90). El criterio principal y el percentil 95 dan clasificaciones prácticamente equivalentes (34.7% vs. 31.1%), confirmando la consistencia del umbral elegido con su equivalente no paramétrico.
+
+```{r sensibilidad_Bootstrapping, fig.width=7, fig.height=4}
+# Bootstrapping del punto de corte (IC 95%)
+set.seed(123)
+n_boot <- 1000
+
+boot_cortes <- replicate(n_boot, {
+  muestra <- sample(ctrl_scores, replace = TRUE)
+  mean(muestra) + 2 * sd(muestra)
+})
+
+cat("Punto de corte observado (media+2SD):",
+    round(statsctrl$media + 2 * statsctrl$sd, 3), "\n")
+cat("IC 95% bootstrapping:",
+    round(quantile(boot_cortes, 0.025), 3), "–",
+    round(quantile(boot_cortes, 0.975), 3), "\n")
+
+# Histograma bootstrap
+tibble(corte = boot_cortes) %>%
+  ggplot(aes(x = corte)) +
+  geom_histogram(bins = 40, fill = "#6baed6", color = "white", alpha = 0.85) +
+  geom_vline(xintercept = statsctrl$media + 2 * statsctrl$sd,
+             color = "firebrick", linewidth = 1, linetype = "dashed") +
+  annotate("text",
+           x     = statsctrl$media + 2 * statsctrl$sd + 0.02,
+           y     = Inf, vjust = 1.5,
+           label = paste0("Observado: ",
+                          round(statsctrl$media + 2 * statsctrl$sd, 3)),
+           color = "firebrick", size = 3.5, hjust = 0) +
+  labs(
+    title    = "Distribución bootstrap del punto de corte (n = 1.000 remuestras)",
+    subtitle = paste0("IC 95%: [",
+                      round(quantile(boot_cortes, 0.025), 3), " – ",
+                      round(quantile(boot_cortes, 0.975), 3), "]"),
+    x        = "Punto de corte (media + 2SD)",
+    y        = "Frecuencia"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title       = element_text(face = "bold"),
+    plot.subtitle    = element_text(color = "grey40", size = 10),
+    panel.grid.minor = element_blank()
+  )
+```
+
+La estimación del punto de corte mediante bootstrapping (n = 1.000 remuestras) proporciona un IC 95% de [0.496–1.846], cuya amplitud refleja la variabilidad inherente al tamaño muestral reducido del grupo control (n = 24) y no compromete la validez del umbral, que se mantiene en el rango de los criterios alternativos evaluados. En conjunto, estos resultados respaldan la robustez de la clasificación IFN-high/IFN-low adoptada.
+
+## Análisis de normalidad del IFN-score
+
+```{r normalidad_ifnscore}
+# Shapiro-Wilk por grupo
+grupos <- list(
+  "LES IFN-high" = DataSet_genes %>% filter(les == "LES", ifn_grupo == "IFN-high") %>% pull(ifnscore72),
+  "LES IFN-low"  = DataSet_genes %>% filter(les == "LES", ifn_grupo == "IFN-low")  %>% pull(ifnscore72),
+  "LES (total)"  = DataSet_genes %>% filter(les == "LES")                           %>% pull(ifnscore72),
+  "Controles"    = DataSet_genes %>% filter(les == "Control")                       %>% pull(ifnscore72)
+)
+
+tabla_norm <- map_dfr(names(grupos), function(nombre) {
+  x  <- grupos[[nombre]]
+  sw <- shapiro.test(x)
+  tibble::tibble(
+    Grupo      = nombre,
+    N          = length(x),
+    Media      = round(mean(x,   na.rm = TRUE), 3),
+    Mediana    = round(median(x, na.rm = TRUE), 3),
+    DE         = round(sd(x,     na.rm = TRUE), 3),
+    W          = round(sw$statistic, 4),
+    `p-valor`  = formatC(sw$p.value, format = "e", digits = 2),
+    Normalidad = ifelse(sw$p.value > 0.05, "Sí", "No")
+  )
+})
+
+tabla_norm %>%
+  kable(caption = "Tabla. Test de Shapiro-Wilk e indicadores descriptivos
+        del IFN-score de 72 genes por grupo de estudio.",
+        align = "lccccccc") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"),
+                full_width = FALSE, position = "center")
+```
+
+```{r graficos_normalidad, fig.width=12, fig.height=9}
+# Histogramas + QQ-plots
+df_norm <- DataSet_genes %>%
+  mutate(grupo = case_when(
+    les == "Control"                       ~ "Controles",
+    les == "LES" & ifn_grupo == "IFN-high" ~ "LES IFN-high",
+    les == "LES" & ifn_grupo == "IFN-low"  ~ "LES IFN-low"
+  )) %>%
+  filter(!is.na(grupo))
+
+col_grupos <- c(
+  "Controles"    = col_control,
+  "LES IFN-high" = col_high,
+  "LES IFN-low"  = col_low
+)
+
+# Histogramas
+p_hist <- ggplot(df_norm, aes(x = ifnscore72, fill = grupo)) +
+  geom_histogram(aes(y = after_stat(density)),
+                 bins = 30, color = "white", alpha = 0.85) +
+  stat_function(fun = dnorm,
+                args = list(mean = mean(df_norm$ifnscore72, na.rm = TRUE),
+                            sd   = sd(df_norm$ifnscore72,   na.rm = TRUE)),
+                color = "grey20", linewidth = 0.8, linetype = "dashed") +
+  facet_wrap(~grupo, scales = "free", ncol = 3) +
+  scale_fill_manual(values = col_grupos) +
+  labs(title = "Distribución del IFN-score 72 genes por grupo",
+       x = "IFN-score (log2, expresión relativa)", y = "Densidad") +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "none",
+        strip.text = element_text(face = "bold"),
+        panel.grid.minor = element_blank())
+
+# QQ-plots
+p_qq <- ggplot(df_norm, aes(sample = ifnscore72, color = grupo)) +
+  stat_qq(size = 1.5, alpha = 0.6) +
+  stat_qq_line(linewidth = 0.8, linetype = "dashed", color = "grey30") +
+  facet_wrap(~grupo, scales = "free", ncol = 3) +
+  scale_color_manual(values = col_grupos) +
+  labs(title = "QQ-plot del IFN-score 72 genes por grupo",
+       x = "Cuantiles teóricos", y = "Cuantiles observados") +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "none",
+        strip.text = element_text(face = "bold"),
+        panel.grid.minor = element_blank())
+
+gridExtra::grid.arrange(p_hist, p_qq, nrow = 2)
+```
+
+## Validación. Correlación y concordancia entre IFN-score 72 genes e IFN-score 4 genes
+
+```{r validacion_concordancia, fig.width=7, fig.height=6}
+# 9.6.1  Correlación de Spearman entre ambos scores
+les_df <- DataSet_genes %>% 
+  dplyr::filter(les == "LES")
+
+spearman_res <- cor.test(
+  les_df$ifnscore72, les_df$ifnscore4,
+  method = "spearman", exact = FALSE
+)
+
+rho_val <- round(spearman_res$estimate, 3)
+p_val   <- formatC(spearman_res$p.value, format = "e", digits = 2)
+
+# 
+cat("Correlación de Spearman (IFN-72 vs. IFN-4)\n")
+cat("  ρ =", rho_val, "\n")
+cat("  p =", p_val,   "\n")
+```
+
+La validación cruzada del IFN-score de 72 ISGs frente al IFN-score 
+clásico de 4 genes (IFI27, IFI44, IFI44L, RSAD2) reveló una 
+correlación de Spearman casi perfecta (ρ = 0.972, p < 0.001), 
+lo que indica que ambos instrumentos capturan de forma equivalente 
+la activación de la vía de interferón tipo I en pacientes con LES.
+
+```{r Correlacion IFN-score4 vs IFN-score72, fig.width=6.5, fig.height=5.5}
+# 9.6.2  Punto de corte ifngrupo4 + Gráfico de dispersión
+
+statsctrl4 <- DataSet_genes %>%
+  filter(les == "Control") %>%
+  summarise(media = mean(ifnscore4, na.rm = TRUE),
+            sd    = sd(ifnscore4,   na.rm = TRUE))
+
+corte_ifn4 <- statsctrl4$media + 2 * statsctrl4$sd
+cat("Punto de corte IFN-score 4 genes:", round(corte_ifn4, 3), "\n")
+
+les_df <- les_df %>%
+  mutate(
+    ifn_grupo4 = factor(ifelse(ifnscore4 > corte_ifn4, "IFN-high", "IFN-low"))
+  )
+
+ggplot(les_df, aes(x = ifnscore72, y = ifnscore4)) +
+  geom_point(aes(color = ifn_grupo), alpha = 0.6, size = 2) +
+  geom_smooth(method = "lm", se = TRUE,
+              color = "grey30", fill = "grey85", linewidth = 0.8) +
+  geom_vline(xintercept = corte_ifn72, linetype = "dashed",
+             color = "firebrick", linewidth = 0.6) +
+  geom_hline(yintercept = corte_ifn4, linetype = "dashed",
+             color = "firebrick", linewidth = 0.6) +
+  annotate("text",
+           x = min(les_df$ifnscore72, na.rm = TRUE) + 0.1,
+           y = max(les_df$ifnscore4,  na.rm = TRUE) - 0.3,
+           label = paste0("ρ = ", rho_val, "\np = ", p_val),
+           hjust = 0, size = 4, color = "grey20", fontface = "italic") +
+  scale_color_manual(
+    values = c("IFN-high" = col_high, "IFN-low" = col_low),
+    name   = "Clasificación\n(IFN-score 72)"
+  ) +
+  labs(
+    title    = "Correlación continua entre IFN-score 72 genes e IFN-score 4 genes",
+    subtitle = paste0("Pacientes LES (n = ", nrow(les_df), "). ",
+                      "Correlación de Spearman"),
+    x        = "IFN-score 72 genes ISG (log2, expresión relativa)",
+    y        = "IFN-score 4 genes clásicos (log2, expresión relativa)"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title       = element_text(face = "bold", size = 13, hjust = 0.5),
+    plot.subtitle    = element_text(color = "grey40", size = 10, hjust = 0.5),
+    legend.position  = "right",
+    panel.grid.minor = element_blank(),
+    axis.line.x      = element_line(color = "grey70"),
+    axis.line.y      = element_line(color = "grey70")
+  )
+```
+
+```{r concordancia_clasificacion}
+# 9.6.3  Concordancia de clasificación IFN-high / IFN-low
+
+kappa_res <- kappa2(data.frame(les_df$ifn_grupo, les_df$ifn_grupo4))
+
+cat("Kappa de Cohen:", round(kappa_res$value, 3),
+    "\np =",          formatC(kappa_res$p.value, format = "e", digits = 2),
+    "\nInterpretación:", dplyr::case_when(
+      kappa_res$value >= 0.81 ~ "Casi perfecta (≥ 0.81)",
+      kappa_res$value >= 0.61 ~ "Sustancial (0.61–0.80)",
+      kappa_res$value >= 0.41 ~ "Moderada (0.41–0.60)",
+      kappa_res$value >= 0.21 ~ "Discreta (0.21–0.40)",
+      TRUE                    ~ "Escasa (< 0.21)"
+    ), "\n")
+
+tabla_df <- les_df %>%
+  count(ifn_grupo, ifn_grupo4) %>%
+  group_by(ifn_grupo) %>%
+  mutate(pct = paste0(n, " (", round(n / sum(n) * 100, 1), "%)")) %>%
+  select(ifn_grupo, ifn_grupo4, pct) %>%
+  tidyr::pivot_wider(names_from  = ifn_grupo4,
+                     values_from = pct,
+                     values_fill = "0 (0%)") %>%
+  rename(`IFN-score 72 genes` = ifn_grupo) %>%
+  select(`IFN-score 72 genes`, `IFN-high`, `IFN-low`)
+
+tabla_df %>%
+  kable(
+    caption = paste0("Tabla. Concordancia de clasificación IFN-high/IFN-low entre ",
+                     "IFN-score 72 genes (filas) e IFN-score 4 genes clásicos (columnas). ",
+                     "n (%). κ = ", round(kappa_res$value, 3),
+                     ", p = ", formatC(kappa_res$p.value, format = "e", digits = 2), "."),
+    align      = "lcc",
+    col.names  = c("IFN-score 72 genes", "IFN-high", "IFN-low")
+  ) %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover"),
+    full_width = FALSE,
+    position   = "center"
+  ) %>%
+  add_header_above(
+    c(" " = 1, "IFN-score 4 genes (validación)" = 2),
+    bold = TRUE
+  )
+
+```
+
+El punto de corte para el IFN-score de 4 genes, calculado mediante 
+el mismo criterio estadístico (media + 2 desviaciones estándar sobre 
+los controles sanos), se estableció en 3.148 unidades logarítmicas 
+(frente a 1,264 para INF-score de 72 genes). 
+
+La concordancia en la clasificación dicotómica IFN-high/IFN-low entre 
+ambos scores fue sustancial (κ = 0.779, p < 0.001), conforme a los 
+criterios de Landis & Koch, lo que respalda la validez y 
+robustez del IFN-score de 72 genes como medida representativa de la 
+firma transcriptómica de interferón.
+
+```{r Concordancia IFN-score4 vs IFN-score72, fig.width=6, fig.height=5}
+# 9.6.4  Gráfico de barras apiladas (concordancia visual)
+les_df %>%
+  count(ifn_grupo, ifn_grupo4) %>%
+  group_by(ifn_grupo) %>%
+  mutate(pct = n / sum(n) * 100) %>%
+  ggplot(aes(x = ifn_grupo, y = pct, fill = ifn_grupo4)) +
+  geom_col(width = 0.55, color = "white", linewidth = 0.4) +
+  geom_text(aes(label = paste0(n, "\n(", round(pct, 1), "%)")),
+            position = position_stack(vjust = 0.5),
+            size = 3.8, color = "white", fontface = "bold") +
+  scale_fill_manual(
+    values = c("IFN-high" = col_high, "IFN-low" = col_low),
+    name   = "IFN-score 4 genes\n(validación)"
+  ) +
+  scale_x_discrete(labels = c(
+    "IFN-high" = paste0("IFN-high\n(72 genes)"),
+    "IFN-low"  = paste0("IFN-low\n(72 genes)")
+  )) +
+  labs(
+    title    = "Concordancia de clasificación IFN-high/IFN-low",
+    subtitle = paste0("κ = ", round(kappa_res$value, 3),
+                      "  |  p = ", formatC(kappa_res$p.value,
+                                           format = "e", digits = 2)),
+    x = NULL,
+    y = "Porcentaje de pacientes (%)"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title       = element_text(face = "bold", size = 13, hjust = 0.5),
+    plot.subtitle    = element_text(color = "grey40", size = 10, hjust = 0.5),
+    legend.position  = "right",
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_blank(),
+    axis.line.x      = element_line(color = "grey70"),
+    axis.line.y      = element_line(color = "grey70")
+  )
+```
+
+Las discordancias observadas (n = 27; 16.5%) se concentraron exclusivamente 
+en pacientes IFN-low según el score de 72 genes, lo que sugiere que estos casos 
+se sitúan en la zona frontera del umbral de activación interferónica y que el 
+score de 72 genes, al integrar un mayor número de ISGs, ofrece mayor sensibilidad 
+para detectar activación IFN moderada.
+
+---
+
+# Comparación del IFN-score entre pacientes y controles
+
+La elevación del IFN-score en pacientes con LES respecto a controles sanos refleja la activación crónica de la vía de interferón tipo I, descrita como uno de los rasgos transcriptómicos más reproducibles de la enfermedad [@Baechler2003; @Bennett2003; @Chasset2022]
+
+## Estadísticos descriptivos
+
+```{r descriptivo_comparacion}
+DataSet_genes %>%
+  group_by(les) %>%
+  summarise(
+    N       = n(),
+    Media   = round(mean(ifnscore72, na.rm = TRUE), 3),
+    SD      = round(sd(ifnscore72, na.rm = TRUE), 3),
+    Mediana = round(median(ifnscore72, na.rm = TRUE), 3),
+    P25     = round(quantile(ifnscore72, 0.25, na.rm = TRUE), 3),
+    P75     = round(quantile(ifnscore72, 0.75, na.rm = TRUE), 3)
+  ) %>%
+  kable(
+    caption = "Tabla. Estadísticos descriptivos del IFN-score principal (72 genes)",
+    align   = "lcccccc"
+  ) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+
+## Distribución del IFN-score: LES vs controles
+
+```{r boxplot IFN-score72 vs control, fig.width=7, fig.height=5}
+# Test estadístico
+test_wilcox <- DataSet_genes %>%
+  rstatix::wilcox_test(ifnscore72 ~ les) %>%
+  rstatix::add_significance("p")
+
+effect_size <- DataSet_genes %>%
+  rstatix::wilcox_effsize(ifnscore72 ~ les)
+
+# Medianas por grupo para anotación manual
+medianas <- DataSet_genes %>%
+  group_by(les) %>%
+  summarise(med = round(median(ifnscore72, na.rm = TRUE), 2), .groups = "drop")
+
+med_ctrl <- medianas$med[medianas$les == "Control"]
+med_les  <- medianas$med[medianas$les == "LES"]
+
+# Etiquetas eje X con n por grupo
+n_labels  <- DataSet_genes %>%
+  count(les) %>%
+  mutate(label = paste0(les, "\n(n = ", n, ")"))
+label_vec <- setNames(n_labels$label, n_labels$les)
+
+# Gráfico
+ggplot(DataSet_genes, aes(x = les, y = ifnscore72, fill = les)) +
+
+  geom_boxplot(
+    outlier.shape = NA,
+    alpha         = 0.6,
+    width         = 0.45,
+    color         = "grey30",
+    linewidth     = 0.5
+  ) +
+  geom_jitter(
+    aes(color = les),
+    width = 0.12, alpha = 0.45, size = 1.5
+  ) +
+
+  # Mediana al lado derecho de cada caja
+  annotate("text", x = 1.27, y = med_ctrl,
+           label = med_ctrl, size = 3.5,
+           color = "grey20", fontface = "bold", hjust = 0) +
+  annotate("text", x = 2.27, y = med_les,
+           label = med_les, size = 3.5,
+           color = "grey20", fontface = "bold", hjust = 0) +
+
+  # Punto de corte
+  geom_hline(
+    yintercept = corte_ifn72,
+    linetype   = "dashed",
+    color      = "firebrick",
+    linewidth  = 0.75
+  ) +
+  annotate("text",
+    x = 2.5, y = corte_ifn72 + 0.15,
+    label = paste0("Corte = ", round(corte_ifn72, 2)),
+    color = "firebrick", size = 3.2, hjust = 1
+  ) +
+
+  # Barra de significancia
+  stat_compare_means(
+    method       = "wilcox.test",
+    comparisons  = list(c("Control", "LES")),
+    label        = "p.format",
+    tip.length   = 0.015,
+    bracket.size = 0.5,
+    size         = 4,
+    color        = "grey20"
+  ) +
+
+  coord_cartesian(ylim = c(-1, 3.8)) +
+  scale_x_discrete(labels = label_vec) +
+  scale_fill_manual(values  = c("Control" = col_control, "LES" = col_les)) +
+  scale_color_manual(values = c("Control" = col_control_dark, "LES" = col_les_dark)) +
+
+  labs(
+    title    = "IFN-score (72 genes ISG) en controles sanos y pacientes LES",
+    subtitle = paste0(
+      "Test de Wilcoxon  |  p = ", format(test_wilcox$p, scientific = TRUE, digits = 3),
+      "  |  r = ", round(effect_size$effsize, 2),
+      " (", effect_size$magnitude, ")"
+    ),
+    x    = NULL,
+    y    = "IFN-score (log2, expresión relativa)",
+    fill = NULL
+  ) +
+
+  theme_minimal(base_size = 13) +
+  theme(
+    legend.position    = "none",
+    plot.title         = element_text(face = "bold", size = 13, hjust = 0.5),
+    plot.subtitle      = element_text(color = "grey40", size = 10, hjust = 0.5),
+    axis.text.x        = element_text(face = "bold", size = 12),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor   = element_blank(),
+    axis.line.x        = element_line(color = "grey70"),
+    axis.line.y        = element_line(color = "grey70")
+  )
+```
+
+El IFN-score es significativamente mayor en pacientes LES que en controles sanos (test de Wilcoxon, p = 1.05 × 10⁻⁴, r = 0.23).
+
+---
+
+# Caracterización transcriptómica de los subgrupos IFN-high e IFN-low
+
+El análisis de expresión diferencial se realiza comparando la expresión 
+relativa de los 72 ISGs entre los pacientes LES clasificados como IFN-high 
+e IFN-low. Se aplicará el test de Wilcoxon-Mann-Whitney gen a gen con 
+corrección de Benjamini-Hochberg (FDR). Se considerarán diferencialmente 
+expresados los genes con FDR < 0.05 y |Log2 Fold-Change| > 0.5.
+
+```{r setup_apt11}
+# Submatriz de expresión relativa: solo pacientes LES
+expr_les <- expr_rel_72[DataSet_genes$les == "LES", ]
+
+cat("Dimensiones expr_les:", dim(expr_les), "\n")
+# Esperado: 251 filas (pacientes LES) × 72 columnas (genes)
+```
+
+## Expresión diferencial: IFN-high vs IFN-low
+
+```{r diff_expression}
+grupo <- les_df$ifn_grupo
+
+# Test de Wilcoxon gen a gen
+res_list <- lapply(colnames(expr_les), function(gen) {
+  x_high <- expr_les[grupo == "IFN-high", gen]
+  x_low  <- expr_les[grupo == "IFN-low",  gen]
+  wt     <- wilcox.test(x_high, x_low, exact = FALSE)
+  tibble(
+    gen        = gen,
+    media_high = mean(x_high, na.rm = TRUE),
+    media_low  = mean(x_low,  na.rm = TRUE),
+    lfc        = mean(x_high, na.rm = TRUE) - mean(x_low, na.rm = TRUE),
+    p_valor    = wt$p.value
+  )
+})
+
+res_df <- bind_rows(res_list) %>%
+  mutate(fdr = p.adjust(p_valor, method = "BH")) %>%
+  arrange(fdr, desc(abs(lfc)))
+
+res_sig <- res_df %>%
+  filter(fdr < 0.05, abs(lfc) > 0.5)
+
+cat("Genes diferencialmente expresados (FDR < 0.05, |LFC| > 0.5):",
+    nrow(res_sig), "\n")
+
+res_df %>%
+  mutate(
+    across(c(media_high, media_low, lfc), ~ round(.x, 3)),
+    p_valor = formatC(p_valor, format = "e", digits = 2),
+    fdr     = formatC(fdr,     format = "e", digits = 2),
+    Sig.    = ifelse(as.numeric(fdr) < 0.05 & abs(lfc) > 0.5, "✓", "")
+  ) %>%
+  rename(
+    Gen            = gen,
+    `Media IFN-high` = media_high,
+    `Media IFN-low`  = media_low,
+    LFC            = lfc,
+    `p-valor`      = p_valor,
+    FDR            = fdr
+  ) %>%
+  kable(
+    caption = "Tabla. Expresión diferencial de los 72 ISGs entre subgrupos IFN-high e IFN-low (pacientes LES).",
+    align   = "lcccccc"
+  ) %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover"),
+    full_width = FALSE
+  ) %>%
+  scroll_box(height = "400px")
+```
+
+De los 72 ISGs analizados, **65 muestran expresión diferencial significativa** 
+(FDR < 0.05 y |LFC| > 0.5) entre los subgrupos IFN-high e IFN-low, prensentando 
+mayor expresión en el subgrupo IFN-high, con la excepción de BDCA1, que mostró 
+mayor expresión en IFN-low (LFC = −0.289). Los genes con mayor diferencia de 
+expresión son IFI27 (LFC = 5.087), IFI44L (LFC = 4.019) y RSAD2 (LFC = 3.709), todos ellos 
+ISGs clásicos ampliamente descritos en LES [@Chasset2022; @DemersMathieu2023].
+
+Solo 7 genes no alcanzan significación estadística tras corrección por 
+comparaciones múltiples: MYD88, DNAJA1, BDCA1 (sin LFC > 0.5), IRF1, 
+PRKR, TYK2 y NT5C3B.
+
+## Volcano plot
+
+```{r volcano plot IFN-high_low, fig.width=7, fig.height=6}
+res_df <- res_df %>%
+  mutate(
+    categoria = case_when(
+      fdr < 0.05 & lfc >  0.5 ~ "Up en IFN-high",
+      fdr < 0.05 & lfc < -0.5 ~ "Up en IFN-low",
+      TRUE                     ~ "No significativo"
+    ),
+    label = ifelse(fdr < 0.05 & abs(lfc) > 0.5, gen, NA)
+  )
+
+ggplot(res_df, aes(x = lfc, y = -log10(fdr), color = categoria)) +
+  geom_point(alpha = 0.7, size = 2.5) +
+  geom_text_repel(
+    aes(label = label),
+    size          = 2.8,
+    max.overlaps  = 30,
+    box.padding   = 0.5,
+    point.padding = 0.3,
+    segment.size  = 0.3,
+    segment.color = "grey50",
+    show.legend   = FALSE
+  ) +
+  geom_vline(xintercept = c(0.5), linetype = "dashed",
+             color = "grey40", linewidth = 0.5) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed",
+             color = "grey40", linewidth = 0.5) +
+  scale_color_manual(
+    values = c(
+      "Up en IFN-high"   = col_high,
+      "Up en IFN-low"    = col_low,
+      "No significativo" = "grey70"
+    ),
+    name = NULL
+  ) +
+  coord_cartesian(xlim = c(-1, 5.5)) +
+  labs(
+    title    = "Expresión diferencial de ISGs: IFN-high vs IFN-low",
+    subtitle = paste0("72 ISGs | FDR < 0.05 & |LFC| > 0.5: ",
+                      nrow(res_sig), " genes"),
+    x = "Log2 Fold-Change (IFN-high − IFN-low)",
+    y = "-log10(FDR)"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title       = element_text(face = "bold", size = 13, hjust = 0.5),
+    plot.subtitle    = element_text(color = "grey40", size = 10,hjust = 0.5),
+    legend.position  = "top",
+    panel.grid.minor = element_blank(),
+    axis.line.x      = element_line(color = "grey70"),
+    axis.line.y      = element_line(color = "grey70")
+  )
+```
+
+El volcano plot evidencia la sobreexpresión significativa en el subgrupo IFN-high 
+(FDR < 0.05, LFC > 0.5), sin ningún gen con mayor expresión en el subgrupo IFN-low, 
+lo que refleja que la clasificación IFN-high/IFN-low captura un gradiente 
+cuantitativo de activación de la vía de interferón tipo I y no un perfil 
+transcriptómico alternativo.
+
+La elevada significación estadística de la mayoría de los genes (−log10(FDR) > 30) 
+indica una separación robusta entre subgrupos, coherente con el tamaño muestral 
+disponible (n = 251 pacientes LES).
+
+## Top genes sobreexpresados en IFN-high
+
+```{r barplot_top_genes, fig.width=7, fig.height=5}
+top_genes <- res_sig %>%
+  filter(lfc > 0) %>%
+  slice_max(lfc, n = 20) %>%
+  mutate(gen = fct_reorder(gen, lfc))
+
+ggplot(top_genes, aes(x = gen, y = lfc, fill = lfc)) +
+  geom_col(width = 0.7, color = "white") +
+  geom_text(
+    aes(label = paste0("FDR = ", formatC(fdr, format = "e", digits = 1))),
+    hjust = -0.1, size = 3, color = "grey30"
+  ) +
+  coord_flip(clip = "off") +
+  scale_fill_gradient(low = "#fdd0a2", high = col_high, guide = "none") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.3))) +
+  labs(
+    title    = "Top 20 genes sobreexpresados en IFN-high",
+    subtitle = "FDR < 0.05 & LFC > 0.5 | ordenados por LFC",
+    x = NULL,
+    y = "Log2 Fold-Change (IFN-high − IFN-low)"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title         = element_text(face = "bold", size = 13, hjust = 0.5),
+    plot.subtitle      = element_text(color = "grey40", size = 10, hjust = 0.5),
+    panel.grid.minor   = element_blank(),
+    panel.grid.major.y = element_blank(),
+    axis.line.x        = element_line(color = "grey70")
+  )
+```
+
+## Heatmap de ISGs diferencialmente expresados
+
+El heatmap permite visualizar los módulos de co-expresión génica y confirmar 
+si los subgrupos IFN-high e IFN-low presentan patrones de expresión 
+diferenciados [@NanoString2017].
+
+```{r heatmap_isg, fig.width=11, fig.height=9}
+mat_heat <- t(expr_les)
+colnames(mat_heat) <- rownames(expr_les)
+
+ann_col <- data.frame(
+  `IFN-grupo` = as.character(grupo),
+  row.names   = rownames(expr_les),
+  check.names = FALSE
+)
+
+ann_colors <- list(
+  `IFN-grupo` = c("IFN-high" = col_high, "IFN-low" = col_low)
+)
+
+pheatmap(
+  mat_heat,
+  annotation_col    = ann_col,
+  annotation_colors = ann_colors,
+  show_colnames     = FALSE,
+  cluster_rows      = TRUE,
+  cluster_cols      = TRUE,
+  scale             = "row",
+  color             = colorRampPalette(c(col_low, "white", col_high))(100),
+  fontsize_row      = 8,
+  main              = "Heatmap de los 72 ISGs en pacientes LES\nIFN-high vs IFN-low (z-score por gen)",
+  border_color      = NA,
+  treeheight_col    = 30,
+  treeheight_row    = 30,
+  cutree_cols       = 2
+)
+```
+
+El heatmap de los 72 ISGs analizados revela una separación clara entre 
+los subgrupos IFN-high e IFN-low, con dos grandes clústeres de columnas 
+que se corresponden mayoritariamente con la clasificación establecida 
+por el IFN-score. Los pacientes IFN-high presentan una sobreexpresión 
+coordinada y de alta intensidad de prácticamente todos los ISGs del panel, 
+mientras que los pacientes IFN-low muestran niveles de expresión cercanos 
+o por debajo de la mediana de los controles sanos (z-score ≈ 0).
+
+Se observan dos bloques de genes con diferente gradiente de respuesta: 
+un bloque de alta activación (IFI44L, IFI44, OAS3, RSAD2, ISG15, IFIT1/2/3) 
+y un bloque de respuesta más moderada (TRIM38, IL6, CXCL9, CEACAM1), 
+coherente con los resultados del análisis diferencial. Precisamente, el bloque de alta activación incluye los 4 genes del IFN-score clásico (IFI27, IFI44, IFI44L, RSAD2), lo que valida su elección como marcadores representativos de la firma. 
+Los 7 genes que no alcanzan significación estadística tras corrección por comparaciones 
+múltiples (PRKR, TYK2, NT5C3B, IRF1, DNAJA1, MYD88 y BDCA1) muestran 
+un patrón de expresión homogéneo entre ambos subgrupos, confirmando 
+su escasa contribución diferencial a la firma de interferón.
+
+## PCA de pacientes LES según firma ISG
+
+El PCA sobre la matriz log2-normalizada de los 72 ISGs permite identificar 
+la estructura global de variabilidad transcriptómica, detectar muestras 
+outliers y explorar si los subgrupos clínicos se separan en el espacio 
+génico [@NanoString2017].
+
+```{r varianza_pca}
+# Varianza explicada por cada componente
+pca_res <- prcomp(expr_les, scale. = TRUE, center = TRUE)
+var_exp_all <- round(summary(pca_res)$importance[2, ] * 100, 1)
+
+tibble(
+  Componente = paste0("PCA", seq_along(var_exp_all)),
+  `Varianza explicada (%)` = var_exp_all,
+  `Varianza acumulada (%)` = cumsum(var_exp_all)
+) %>%
+  slice(1:5) %>%   # mostrar solo las 10 primeras
+  kable(
+    caption = "Tabla. Varianza explicada por las primeras componentes principales (PCA sobre 72 ISGs, pacientes LES).",
+    align   = "lcc"
+  ) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+
+```{r PCA IFN High vs Low, fig.width=6.5, fig.height=5.5}
+var_exp_pc1 <- var_exp_all["PC1"]
+var_exp_pc2 <- var_exp_all["PC2"]
+
+pca_df <- tibble(
+  PC1       = pca_res$x[, 1],
+  PC2       = pca_res$x[, 2],
+  ifn_grupo = grupo
+)
+
+ggplot(pca_df, aes(x = PC1, y = PC2, color = ifn_grupo, fill = ifn_grupo)) +
+  geom_point(alpha = 0.75, size = 2.5) +
+  stat_ellipse(
+    level     = 0.95,
+    linewidth = 0.9,
+    linetype  = "dashed",
+    geom      = "polygon",
+    alpha     = 0.04
+  ) +
+  scale_color_manual(
+    values = c("IFN-high" = col_high, "IFN-low" = col_low),
+    name   = "Subgrupo IFN"
+  ) +
+  scale_fill_manual(
+    values = c("IFN-high" = col_high, "IFN-low" = col_low),
+    name   = "Subgrupo IFN"
+  ) +
+  labs(
+    title    = "PCA de pacientes LES según expresión de 72 ISGs",
+    subtitle = paste0("PCA1 explica el ", var_exp_pc1,
+                      "% de la varianza; PC2 el ", var_exp_pc2, "%"),
+    x = paste0("PCA1 (", var_exp_pc1, "%)"),
+    y = paste0("PCA2 (", var_exp_pc2, "%)")
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title       = element_text(face = "bold", size = 13, hjust = 0.5),
+    plot.subtitle    = element_text(color = "grey40", size = 10, hjust = 0.5),
+    legend.position  = "right",
+    panel.grid.minor = element_blank(),
+    axis.line.x      = element_line(color = "grey70"),
+    axis.line.y      = element_line(color = "grey70")
+  )
+```
+
+El análisis de componentes principales (PCA) sobre la matriz log2-normalizada de los 72 ISGs en pacientes con LES muestra que el primer componente principal (PC1) explica el 73,7% de la varianza total, concentrando en una única dimensión la mayor parte de la heterogeneidad transcriptómica de la cohorte.
+
+---
+
+# Construcción del dataset para análisis de asociación clínica
+
+Se crea un dataset que incluye los índices de actividad y daño, las variables séricas y analíticas, el IFN-score principal (72 genes ISG), la clasificación IFN-high/low y la expresión relativa de los 72 ISG para el posterior análisis de asociación con variables clínicas y estudios de multiómica.
+
+```{r construccion-dataset-}
+# Variables clínicas y séricas
+vars_clinicas <- c(
+  "id2", "varon1", "les", "edad", "duracion", "edadiag",
+  "sledai", "slicc", "sledas", "lldas", "doris",
+  "pcrmgl", "creatinina", "colesterol", "trigli", "hdl", "ldl",
+  "apoa1", "apob", "apoba", "lipoprotein a",
+  "glucosa", "insulinauuml", "pepcngml",
+  "glucosanmoll", "insulinapmoll", "pepcnmoll",
+  "homair", "homas", "homab",
+  "c3", "c4", "got", "gpt", "ggt", "prot tot",
+  "IFNapgml", "IFNgpgml", "IL2pgml", "IL6pgml", "IL8pgml", "baffpgml",
+  "ifnscore72", "ifnscore4", "ifn_grupo"
+)
+
+# Variables clínicas (solo LES)
+datos_clinicos <- DataSet_genes %>%
+  filter(les == "LES") %>%
+  select(any_of(vars_clinicas))
+
+# Expresión relativa 72 ISGs (ya filtrada a LES)
+expr_df <- as.data.frame(expr_les)
+
+# Verificar alineación de filas
+stopifnot(all(rownames(expr_df) == datos_clinicos$id2))
+
+# Unir
+DataSet_scores_prot_genes <- bind_cols(datos_clinicos, expr_df)
+
+saveRDS(DataSet_scores_prot_genes, "DataSet_scores_prot_genes.rds")
+
+cat("Archivo guardado: DataSet_scores_prot_genes.rds\n")
+cat("- Pacientes LES:     ", nrow(DataSet_scores_prot_genes), "\n")
+cat("- Variables clínicas:", ncol(datos_clinicos), "\n")
+cat("- Genes ISG72:       ", ncol(expr_df), "\n")
+cat("- Variables totales: ", ncol(DataSet_scores_prot_genes), "\n")
+```
+
+---
+
+# Referencias Firma de interferón y análisis NanoString
+
+- **Plataforma NanoString nCounter**: Geiss GK et al. *Nat Biotechnol.* 2008;26(3):317–25.
+- **Normalización NanoString**: NanoString Technologies. *Gene Expression Data Analysis Guidelines.* 2017.
+- **Firma IFN en LES (microarray)**: Baechler EC et al. *Proc Natl Acad Sci USA.* 2003;100(5):2610–15.
+- **Firma IFN en LES (microarray)**: Bennett L et al. *J Exp Med.* 2003;197(6):711–23.
+- **IFN-score 4 genes y actividad LES**: Chasset F et al. *Rheumatology.* 2022;61(Suppl 1):si59–68.
+- **IFN-score vs. IFN-α sérico**: Demers-Mathieu V et al. *Lupus.* 2023;32:1–9.
+- **Firma IFN basal y pronóstico a 5 años**: Mai L et al. *Arthritis Res Ther.* 2021;23:279.
+
+---

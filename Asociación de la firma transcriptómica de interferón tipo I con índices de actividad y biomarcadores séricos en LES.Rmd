@@ -1,0 +1,1446 @@
+---
+title: "Asociación de la firma transcriptómica de interferón tipo I con índices de actividad y biomarcadores séricos en LES"
+author: "Fuensanta Bernal Gómez"
+date: "`r format(Sys.Date(), '%d de %B de %Y')`"
+output:
+  html_document:
+    self_contained: true
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    toc_depth: 3
+    number_sections: true
+    css: estilos.css
+    theme: flatly
+    highlight: tango
+    df_print: paged
+    code_folding: show
+    fig_width: 8
+    fig_height: 5
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo        = TRUE,
+  warning     = FALSE,
+  message     = FALSE,
+  fig.path    = "figuras/Asociación de la firma transcriptómica/",  
+  dev         = "png",
+  dpi         = 300,
+  fig.width   = 8,          
+  fig.height  = 5,            
+  fig.align   = "center",
+  bg          = "white",
+  cache       = FALSE
+)
+```
+
+# Introducción
+
+Este documento recoge el análisis estadístico de la firma de interferón tipo I (IFN)
+en una cohorte de pacientes con Lupus Eritematoso Sistémico (LES), con el objetivo
+de caracterizar los subgrupos IFN-high e IFN-low en función de sus perfiles clínico,
+bioquímico y proteómico, e identificar los determinantes moleculares y clínicos
+asociados a la activación de la vía IFN tipo I.
+
+La firma transcriptómica de interferón tipo I —definida por la sobreexpresión de genes
+estimulados por interferón (ISGs)— constituye uno de los rasgos moleculares más
+reproducibles del LES, presente en aproximadamente el 50–75% de los pacientes
+[@Baechler2003; @Bennett2003; @Chasset2022]. Su activación se ha asociado con mayor
+actividad de la enfermedad, afectación orgánica y peor pronóstico a largo plazo
+[@Postal2020; @Slight-Webb2020].
+
+El análisis se estructura en los siguientes bloques:
+
+- **Bloque 1 – Comparativa clínica IFN-high vs. IFN-low**: descripción de las
+  características demográficas y clínicas de la cohorte mediante la Tabla 1,
+  con contraste estadístico no paramétrico (Mann-Whitney / Chi-cuadrado).
+- **Bloque 2 – Correlaciones de Spearman**: análisis de la asociación entre el
+  IFN-score y las variables clínicas, bioquímicas y proteínas plasmáticas,
+  con corrección de la tasa de falsos positivos (FDR, Benjamini-Hochberg)
+  y visualización mediante correlograma.
+- **Bloque 3 – Regresión logística**: modelos univariable y multivariable para
+  identificar los predictores independientes de la clasificación IFN-high,
+  con estimación de odds ratios (OR) e intervalos de confianza al 95%.
+- **Bloque 4 – Regresión lineal múltiple**: modelización del IFN-score como
+  variable continua en función de los índices de actividad clínica y las
+  proteínas plasmáticas, con evaluación de supuestos y diagnóstico del modelo.
+- **Bloque 5 – Curvas ROC y comparación DeLong**: evaluación de la capacidad
+  discriminativa del IFN-score frente a biomarcadores clínicos establecidos, 
+  con comparación formal de las AUC mediante el  test de DeLong.
+- **Bloque 6 – Visualización integrativa**: boxplots comparativos, diagramas
+  de dispersión (scatter plots) y forest plot de los modelos de regresión
+  para síntesis visual de los resultados principales.
+
+---
+
+# Carga de paquetes
+
+```{r librerias}
+paquetes <- c(
+  "dplyr", "tidyr", "ggplot2", "knitr", "kableExtra",
+  "tableone", "ggpubr", "rstatix", "tibble", "forcats",
+  "scales", "purrr","broom", "pROC"
+)
+
+for (pkg in paquetes) {
+  if (!requireNamespace(pkg, quietly = TRUE)) install.packages(pkg)
+  library(pkg, character.only = TRUE)
+}
+```
+
+---
+
+# Paleta de colores 
+
+```{r paleta-colores}
+col_high      <- "#cb181d"   # rojo oscuro  (IFN-high - borde/puntos)
+col_low       <- "#fc9272"   # rojo claro   (IFN-low  - borde/puntos)
+col_high_fill <- "#fb6a4a"   # salmón       (IFN-high - fill)
+col_low_fill  <- "#fee0d2"   # rosa claro   (IFN-low  - fill)
+```
+
+---
+
+# Importación del dataset
+
+Se importó el objeto `DataSet_scores_prot_genes.rds` generado en el documento anterior (*Análisis de Expresión Génica y Firma de Interferón*), que contiene las variables clínicas, analíticas, las citocinas séricas, el IFN-score de 72 ISGs y la clasificación IFN-high/IFN-low para los pacientes LES.
+
+```{r carga-datos}
+df <- readRDS("DataSet_scores_prot_genes.rds")
+
+cat("Dimensiones:", nrow(df), "filas x", ncol(df), "columnas\n")
+cat("Pacientes IFN-high:", sum(df$ifn_grupo == "IFN-high", na.rm = TRUE), "\n")
+cat("Pacientes IFN-low: ", sum(df$ifn_grupo == "IFN-low",  na.rm = TRUE), "\n")
+```
+
+## Codificación de variables
+
+Se codificaron las variables categóricas como factores y se crearon las versiones categorizadas de los índices de actividad SLEDAI-2K y SLE-DAS según los umbrales publicados. El SLEDAI-2K se estratificó en cuatro niveles de actividad [@Gladman2002], mientras que el SLE-DAS se categorizó conforme al criterio de Jorge et al. [@Jorge2021]: remisión (≤ 2.08), actividad leve (2.08–7.64) y actividad moderada-grave (> 7.64). El SLICC Damage Index (SLICC-DI) se mantuvo como variable continua dado que cuantifica el daño acumulado de forma ordinal en un rango de 0 a 47 puntos [@Gladman1996].
+
+```{r codificacion}
+df <- df %>%
+  mutate(
+    # Variable respuesta: grupo IFN
+    ifn_grupo = factor(ifn_grupo,
+                       levels = c("IFN-low", "IFN-high")),
+
+    # Sexo
+    varon1 = factor(varon1,
+                    levels = c("Mujer", "Varón")),
+
+    # Variables binarias de remisión/actividad
+    lldas = factor(lldas,
+                   levels = c(0, 1),
+                   labels = c("No", "Sí")),
+    doris = factor(doris,
+                   levels = c(0, 1),
+                   labels = c("No", "Sí")),
+
+    # SLEDAI-2K categorizado (Gladman et al. 2002)
+    sledai_cat = case_when(
+      sledai == 0               ~ "Inactivo",
+      sledai >= 1  & sledai <= 5  ~ "Leve",
+      sledai >= 6  & sledai <= 10 ~ "Moderado",
+      sledai >= 11 & sledai <= 19 ~ "Alto",
+      sledai >= 20              ~ "Muy alto"
+    ),
+    sledai_cat = factor(sledai_cat,
+                        levels = c("Inactivo", "Leve",
+                                   "Moderado", "Alto", "Muy alto")),
+
+    # SLE-DAS categorizado (Jorge et al. 2021)
+    sledas_cat = case_when(
+      sledas <= 2.08                      ~ "Remisión",
+      sledas > 2.08 & sledas <= 7.64      ~ "Leve",
+      sledas > 7.64                       ~ "Moderada-grave"
+    ),
+    sledas_cat = factor(sledas_cat,
+                        levels = c("Remisión", "Leve", "Moderada-grave"))
+  )
+```
+
+```{r renombrar-columnas}
+df <- df %>%
+  rename(
+    lipoprotein_a = `lipoprotein a`,
+    prot_tot      = `prot tot`
+  )
+```
+
+# Bloque 1 – Comparativa IFN-high vs. IFN-low
+
+## Test de normalidad
+
+Antes de seleccionar el test de contraste adecuado hubo que evaluar la normalidad de las variables continuas mediante el test de Shapiro-Wilk. El incumplimiento del supuesto de normalidad en la mayoría de las variables justificó el uso de pruebas no paramétricas para todas las comparaciones entre grupos.
+
+```{r normalidad}
+vars_cont <- c(
+  "edad", "duracion", "edadiag",
+  "sledai", "sledas", "slicc",
+  "pcrmgl", "creatinina",
+  "colesterol", "trigli", "hdl", "ldl",
+  "apoa1", "apob", "apoba", "lipoprotein_a",
+  "glucosa", "insulinauuml", "pepcngml",
+  "glucosanmoll", "insulinapmoll", "pepcnmoll",
+  "homair", "homas", "homab",
+  "c3", "c4", "got", "gpt", "ggt", "prot_tot",
+  "IFNapgml", "IFNgpgml", "IL2pgml",
+  "IL6pgml", "IL8pgml", "baffpgml"
+)
+
+tabla_norm <- map_dfr(vars_cont, function(v) {
+  x  <- na.omit(df[[v]])
+  sw <- tryCatch(shapiro.test(x),
+                 error = function(e) list(p.value = NA))
+
+  tibble(
+    Variable    = v,
+    N           = length(x),
+    Mediana     = round(median(x), 2),
+    IQR         = round(IQR(x), 2),
+    `p-valor`   = ifelse(is.na(sw$p.value), "—",
+                         formatC(as.numeric(sw$p.value),
+                                 format = "e", digits = 2)),
+    Distribución = ifelse(is.na(sw$p.value), "—",
+                          ifelse(sw$p.value > 0.05, "Normal", "No normal"))
+  )
+})
+
+tabla_norm %>%
+  kable(
+    caption = "Tabla 1. Test de Shapiro-Wilk para las variables continuas del análisis.",
+    align   = "lccccc"
+  ) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = FALSE) %>%
+  scroll_box(height = "400px")
+```
+
+## Tabla Comparativa IFN-high vs. IFN-low con índices de actividad y biomarcadores. 
+
+Se compararon las características demográficas, los índices de actividad y remisión, y los parámetros bioquímicos y proteómicos entre los grupos **IFN-high** e **IFN-low**, definidos a partir del IFN-score de 72 ISGs. Las variables continuas se describen mediante mediana e intervalo intercuartílico [IQR] y se comparan mediante el **test de Mann-Whitney**, dado el incumplimiento generalizado del supuesto de normalidad (Shapiro-Wilk, p < 0.05 en la mayoría de variables). Las variables categóricas (sexo, LLDAS y DORIS) se presentan como frecuencia absoluta y relativa (%) y se comparan mediante el **test exacto de Fisher**. 
+
+Para controlar la inflación del error de tipo I debida a las comparaciones múltiples, se aplicó corrección por **FDR (Benjamini-Hochberg)** sobre el conjunto global de p-valores de las pruebas de Mann-Whitney. Se consideraron estadísticamente significativas las diferencias con **p-adj < 0.05**.
+
+```{r tabla-comparativa-global}
+vars_cont_global <- c(
+  "edad", "duracion", "edadiag",
+  "sledai", "sledas", "slicc",
+  "pcrmgl", "creatinina",
+  "colesterol", "trigli", "hdl", "ldl",
+  "apoa1", "apob", "apoba", "lipoprotein_a",
+  "glucosa", "insulinauuml", "pepcngml",
+  "glucosanmoll", "insulinapmoll", "pepcnmoll",
+  "homair", "homas", "homab",
+  "c3", "c4", "got", "gpt", "ggt", "prot_tot",
+  "IFNapgml", "IFNgpgml", "IL2pgml",
+  "IL6pgml", "IL8pgml", "baffpgml"
+)
+
+vars_cat_global <- c("varon1", "lldas", "doris")
+
+vars_all <- c(
+  "edad", "varon1", "duracion", "edadiag",
+  "sledai", "sledas", "slicc", "lldas", "doris",
+  "pcrmgl", "creatinina",
+  "colesterol", "trigli", "hdl", "ldl",
+  "apoa1", "apob", "apoba", "lipoprotein_a",
+  "glucosa", "insulinauuml", "pepcngml",
+  "glucosanmoll", "insulinapmoll", "pepcnmoll",
+  "homair", "homas", "homab",
+  "c3", "c4", "got", "gpt", "ggt", "prot_tot",
+  "IFNapgml", "IFNgpgml", "IL2pgml",
+  "IL6pgml", "IL8pgml", "baffpgml"
+)
+
+# CreateTableOne
+tab_global <- CreateTableOne(
+  vars       = vars_all,
+  strata     = "ifn_grupo",
+  data       = df,
+  factorVars = vars_cat_global,
+  addOverall = TRUE
+)
+
+tab_global_mat <- print(tab_global,
+                        nonnormal     = vars_cont_global,
+                        showAllLevels = FALSE,
+                        quote         = FALSE,
+                        noSpaces      = TRUE,
+                        printToggle   = FALSE)
+
+tab_global_mat <- tab_global_mat[, !colnames(tab_global_mat) %in% "test"]
+colnames(tab_global_mat) <- gsub("Overall", "Global", colnames(tab_global_mat))
+
+# FDR global (Mann-Whitney sobre variables continuas)
+comp_resultado <- map_dfr(vars_cont_global, function(v) {
+  datos <- df %>%
+    filter(!is.na(.data[[v]]), !is.na(ifn_grupo)) %>%
+    select(ifn_grupo, valor = all_of(v))
+
+  grp_high <- datos$valor[datos$ifn_grupo == "IFN-high"]
+  grp_low  <- datos$valor[datos$ifn_grupo == "IFN-low"]
+  test     <- wilcox.test(grp_high, grp_low, exact = FALSE)
+
+  tibble(Variable = v, p_valor = test$p.value)
+})
+
+comp_resultado <- comp_resultado %>%
+  mutate(
+    p_adj     = p.adjust(p_valor, method = "BH"),
+    sig       = case_when(
+      p_adj < 0.001 ~ "***",
+      p_adj < 0.01  ~ "**",
+      p_adj < 0.05  ~ "*",
+      TRUE          ~ ""
+    )
+  ) %>%
+  mutate(
+    p_adj_col = formatC(p_adj, format = "e", digits = 2)
+  )
+
+# Limpiar nombres de filas
+rn_map <- c(
+  edad          = "Edad (años)",
+  varon1        = "Sexo masculino",
+  duracion      = "Duración de la enfermedad (años)",
+  edadiag       = "Edad al diagnóstico (años)",
+  sledai        = "SLEDAI-2K",
+  sledas        = "SLE-DAS",
+  slicc         = "SLICC-DI",
+  lldas         = "LLDAS",
+  doris         = "DORIS",
+  pcrmgl        = "PCR (mg/L)",
+  creatinina    = "Creatinina (mg/dL)",
+  colesterol    = "Colesterol total (mg/dL)",
+  trigli        = "Triglicéridos (mg/dL)",
+  hdl           = "HDL (mg/dL)",
+  ldl           = "LDL (mg/dL)",
+  apoa1         = "Apo A-I (mg/dL)",
+  apob          = "Apo B (mg/dL)",
+  apoba         = "Cociente Apo B/A-I",
+  lipoprotein_a = "Lipoproteína(a) (mg/dL)",
+  glucosa       = "Glucosa (mg/dL)",
+  insulinauuml  = "Insulina (µU/mL)",
+  pepcngml      = "Péptido C (ng/mL)",
+  glucosanmoll  = "Glucosa (nmol/L)",
+  insulinapmoll = "Insulina (pmol/L)",
+  pepcnmoll     = "Péptido C (nmol/L)",
+  homair        = "HOMA-IR",
+  homas         = "HOMA-S",
+  homab         = "HOMA-B",
+  c3            = "C3 (mg/dL)",
+  c4            = "C4 (mg/dL)",
+  got           = "GOT/AST (U/L) †",
+  gpt           = "GPT/ALT (U/L) †",
+  ggt           = "GGT (U/L) †",
+  prot_tot      = "Proteínas totales (g/dL) †",
+  IFNapgml      = "IFN-α (pg/mL)",
+  IFNgpgml      = "IFN-γ (pg/mL)",
+  IL2pgml       = "IL-2 (pg/mL)",
+  IL6pgml       = "IL-6 (pg/mL)",
+  IL8pgml       = "IL-8 (pg/mL)",
+  baffpgml      = "BAFF (pg/mL) †"
+)
+
+rn_clean <- rownames(tab_global_mat)
+rn_clean <- gsub(" \\(median \\[IQR\\]\\)", "", rn_clean)
+rn_clean <- gsub(" = Varón \\(%\\)",        "", rn_clean)
+rn_clean <- gsub(" = Sí \\(%\\)",           "", rn_clean)
+for (var in names(rn_map)) {
+  rn_clean <- gsub(paste0("^", var, "$"), rn_map[var], rn_clean)
+}
+rownames(tab_global_mat) <- rn_clean
+
+# Añadir columnas p-adj (FDR) y Sig.
+p_adj_col <- rep("", nrow(tab_global_mat))
+sig_col   <- rep("", nrow(tab_global_mat))
+names(p_adj_col) <- rownames(tab_global_mat)
+names(sig_col)   <- rownames(tab_global_mat)
+
+for (i in seq_len(nrow(comp_resultado))) {
+  var   <- comp_resultado$Variable[i]
+  label <- rn_map[var]
+  idx   <- which(rownames(tab_global_mat) == label)
+  if (length(idx) > 0) {
+    p_adj_col[idx] <- comp_resultado$p_adj_col[i]
+    sig_col[idx]   <- comp_resultado$sig[i]
+  }
+}
+
+tab_global_mat <- cbind(tab_global_mat,
+                        "p-adj (FDR)" = p_adj_col,
+                        "Sig."        = sig_col)
+
+# Índices de filas por categoría
+rn <- rownames(tab_global_mat)
+
+g1_ini <- which(rn == "Edad (años)")
+g1_fin <- which(rn == "Edad al diagnóstico (años)")
+g2_ini <- which(rn == "SLEDAI-2K")
+g2_fin <- which(rn == "DORIS")
+g3_ini <- which(rn == "PCR (mg/L)")
+g3_fin <- which(rn == "Creatinina (mg/dL)")
+g4_ini <- which(rn == "Colesterol total (mg/dL)")
+g4_fin <- which(rn == "Lipoproteína(a) (mg/dL)")
+g5_ini <- which(rn == "Glucosa (mg/dL)")
+g5_fin <- which(rn == "HOMA-B")
+g6_ini <- which(rn == "C3 (mg/dL)")
+g6_fin <- which(rn == "Proteínas totales (g/dL) †")
+g7_ini <- which(rn == "IFN-α (pg/mL)")
+g7_fin <- which(rn == "BAFF (pg/mL) †")
+
+# Tabla final
+kable(tab_global_mat,
+      caption = paste0(
+        "**Tabla 2.** Características demográficas, clínicas, bioquímicas y ",
+        "proteómicas de los pacientes con LES según grupo de firma de interferón tipo I."
+      ),
+      align = "lcccccc") %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+    full_width        = FALSE,
+    font_size         = 13
+  ) %>%
+  pack_rows("Características demográficas",    g1_ini, g1_fin) %>%
+  pack_rows("Índices de actividad y remisión", g2_ini, g2_fin) %>%
+  pack_rows("Analítica general",               g3_ini, g3_fin) %>%
+  pack_rows("Perfil lipídico",                 g4_ini, g4_fin) %>%
+  pack_rows("Glucosa e insulina",              g5_ini, g5_fin) %>%
+  pack_rows("Complemento y hepática",          g6_ini, g6_fin) %>%
+  pack_rows("Citocinas plasmáticas",           g7_ini, g7_fin) %>%
+  footnote(
+    general = paste0(
+      "Variables continuas: mediana [IQR]; test de Mann-Whitney con corrección FDR (Benjamini-Hochberg). ",
+      "Variables categóricas: n (%); test exacto de Fisher (no incluido en FDR). ",
+      "Sig.: * p-adj < 0.05; ** p-adj < 0.01; *** p-adj < 0.001. ",
+      "† Variables con porcentaje elevado de datos faltantes (> 70%); interpretar con cautela."
+    ),
+    general_title = "Nota: "
+  )
+```
+
+Los pacientes IFN-high presentaron una edad actual significativamente menor y una edad al diagnóstico más precoz que los pacientes IFN-low, lo que es consistente con la literatura, donde la firma IFN elevada se asocia a formas de inicio más temprano [@Chasset2022]. La duración de la enfermedad y la distribución por sexo fueron comparables entre grupos, descartando que actúen como factores de confusión en el análisis posterior.
+
+En cuanto a la actividad clínica, los pacientes IFN-high mostraron puntuaciones significativamente más elevadas en el SLEDAI-2K y el SLE-DAS, mientras que el SLICC-DI, índice de daño acumulado, también fue superior en este grupo [@Gladman2002; @Jorge2021; @Gladman1996]. Los criterios de remisión compuesta LLDAS y DORIS no mostraron diferencias significativas entre grupos, aunque DORIS presentó una tendencia borderline que podría reflejar una menor probabilidad de alcanzar remisión sostenida en pacientes con firma IFN elevada.
+
+En el perfil bioquímico, los hallazgos más relevantes fueron el descenso de HDL y Apo A-I en el grupo IFN-high, que apunta a un perfil lipídico más aterogénico asociado a la activación de la vía IFN tipo I, con potencial relevancia para el riesgo cardiovascular en LES. El metabolismo glucídico e insulínico (glucosa, insulina, HOMA) no mostró diferencias significativas entre grupos. En el compartimento de citocinas plasmáticas, los niveles de IFN-α, IFN-γ e IL-2 fueron significativamente más elevados en el grupo IFN-high, lo que valida a nivel proteico la clasificación basada en la firma transcriptómica.
+
+### Distribución de los niveles de actividad por grupo IFN
+
+```{r Distribución SLEDAS IFN High vs Low, fig.height=5}
+
+# Paleta coherente con el documento
+col_cats_sledai <- c("Inactivo"  = "#d9d9d9",
+                     "Leve"      = "#fc9272",
+                     "Moderado"  = "#cb181d",
+                     "Alto"      = "#67000d",
+                     "Muy alto"  = "#3d0000")
+
+col_cats_sledas <- c("Remisión"        = "#d9d9d9",
+                     "Leve"            = "#fc9272",
+                     "Moderada-grave"  = "#cb181d")
+
+# p-valores Chi-cuadrado
+p_sledai_val <- chisq.test(table(df$ifn_grupo, df$sledai_cat))$p.value
+p_sledas_val <- chisq.test(table(df$ifn_grupo, df$sledas_cat))$p.value
+
+fmt_p <- function(p) ifelse(p < 0.001, "p < 0.001",
+                             paste0("p = ", round(p, 3)))
+
+# SLEDAI-2K
+p_sledai <- df %>%
+  filter(!is.na(sledai_cat)) %>%
+  count(ifn_grupo, sledai_cat) %>%
+  group_by(ifn_grupo) %>%
+  mutate(pct = n / sum(n) * 100) %>%
+  ggplot(aes(x = sledai_cat, y = pct, fill = ifn_grupo)) +
+  geom_col(position = "dodge", width = 0.65,
+           color = "white", linewidth = 0.3) +
+  scale_fill_manual(values = c("IFN-low"  = col_low_fill,
+                               "IFN-high" = col_high_fill),
+                    name = NULL) +
+  annotate("text", x = Inf, y = Inf,
+           label = fmt_p(p_sledai_val),
+           hjust = 1.1, vjust = 1.5,
+           size = 3.5, color = "grey30", fontface = "italic") +
+  labs(title = "SLEDAI-2K", x = NULL, y = "Pacientes (%)") +
+  theme_minimal(base_size = 12) +
+  theme(plot.title         = element_text(face = "bold"),
+        panel.grid.minor   = element_blank(),
+        panel.grid.major.x = element_blank(),
+        legend.position    = "bottom")
+
+# SLE-DAS
+p_sledas <- df %>%
+  filter(!is.na(sledas_cat)) %>%
+  count(ifn_grupo, sledas_cat) %>%
+  group_by(ifn_grupo) %>%
+  mutate(pct = n / sum(n) * 100) %>%
+  ggplot(aes(x = sledas_cat, y = pct, fill = ifn_grupo)) +
+  geom_col(position = "dodge", width = 0.65,
+           color = "white", linewidth = 0.3) +
+  scale_fill_manual(values = c("IFN-low"  = col_low_fill,
+                               "IFN-high" = col_high_fill),
+                    name = NULL) +
+  annotate("text", x = Inf, y = Inf,
+           label = fmt_p(p_sledas_val),
+           hjust = 1.1, vjust = 1.5,
+           size = 3.5, color = "grey30", fontface = "italic") +
+  labs(title = "SLE-DAS", x = NULL, y = "Pacientes (%)") +
+  theme_minimal(base_size = 12) +
+  theme(plot.title         = element_text(face = "bold"),
+        panel.grid.minor   = element_blank(),
+        panel.grid.major.x = element_blank(),
+        legend.position    = "bottom")
+
+ggpubr::ggarrange(p_sledai, p_sledas,
+                  ncol          = 2,
+                  labels        = c("A", "B"),
+                  common.legend = TRUE,
+                  legend        = "bottom")
+```
+
+# Bloque 2 – Correlaciones Spearman + FDR IFN-score ~ variables clínicas/proteínas 
+
+La asociación entre el IFN-score de 72 ISGs (*ifnscore72*) y el conjunto de variables continuas clínicas, bioquímicas y proteómicas se evaluó mediante el coeficiente de correlación de Spearman, adecuado para variables con distribución no normal. Se aplicó corrección por comparaciones múltiples mediante el método de Benjamini-Hochberg (FDR) sobre el conjunto total de p-valores. Se consideraron estadísticamente significativas las correlaciones con p ajustado < 0.05.
+
+```{r correlaciones-spearman}
+vars_cor <- c(
+  "edad", "duracion", "edadiag",
+  "sledai", "sledas", "slicc",
+  "pcrmgl", "creatinina",
+  "colesterol", "trigli", "hdl", "ldl",
+  "apoa1", "apob", "apoba", "lipoprotein_a",
+  "glucosa", "insulinauuml", "pepcngml",
+  "glucosanmoll", "insulinapmoll", "pepcnmoll",
+  "homair", "homas", "homab",
+  "c3", "c4", "got", "gpt", "ggt", "prot_tot",
+  "IFNapgml", "IFNgpgml", "IL2pgml",
+  "IL6pgml", "IL8pgml", "baffpgml"
+)
+
+etiquetas_cor <- c(
+  edad          = "Edad (años)",
+  duracion      = "Duración de la enfermedad (años)",
+  edadiag       = "Edad al diagnóstico (años)",
+  sledai        = "SLEDAI-2K",
+  sledas        = "SLE-DAS",
+  slicc         = "SLICC-DI",
+  pcrmgl        = "PCR (mg/L)",
+  creatinina    = "Creatinina (mg/dL)",
+  colesterol    = "Colesterol total (mg/dL)",
+  trigli        = "Triglicéridos (mg/dL)",
+  hdl           = "HDL (mg/dL)",
+  ldl           = "LDL (mg/dL)",
+  apoa1         = "Apo A-I (mg/dL)",
+  apob          = "Apo B (mg/dL)",
+  apoba         = "Cociente Apo B/A-I",
+  lipoprotein_a = "Lipoproteína(a) (mg/dL)",
+  glucosa       = "Glucosa (mg/dL)",
+  insulinauuml  = "Insulina (µU/mL)",
+  pepcngml      = "Péptido C (ng/mL)",
+  glucosanmoll  = "Glucosa (nmol/L)",
+  insulinapmoll = "Insulina (pmol/L)",
+  pepcnmoll     = "Péptido C (nmol/L)",
+  homair        = "HOMA-IR",
+  homas         = "HOMA-S",
+  homab         = "HOMA-B",
+  c3            = "C3 (mg/dL)",
+  c4            = "C4 (mg/dL)",
+  got           = "GOT/AST (U/L) †",
+  gpt           = "GPT/ALT (U/L) †",
+  ggt           = "GGT (U/L) †",
+  prot_tot      = "Proteínas totales (g/dL) †",
+  IFNapgml      = "IFN-α (pg/mL)",
+  IFNgpgml      = "IFN-γ (pg/mL)",
+  IL2pgml       = "IL-2 (pg/mL)",
+  IL6pgml       = "IL-6 (pg/mL)",
+  IL8pgml       = "IL-8 (pg/mL)",
+  baffpgml      = "BAFF (pg/mL) †"
+)
+
+# Correlaciones de Spearman
+cor_resultado <- map_dfr(vars_cor, function(v) {
+  x   <- df[["ifnscore72"]]
+  y   <- df[[v]]
+  idx <- complete.cases(x, y)
+  x   <- x[idx]; y <- y[idx]
+  test <- cor.test(x, y, method = "spearman", exact = FALSE)
+
+  tibble(
+    Variable = v,
+    Etiqueta = etiquetas_cor[v],
+    N        = length(x),
+    rho      = round(test$estimate, 3),
+    p_valor  = test$p.value
+  )
+})
+
+# Corrección FDR — p_adj_num se mantiene numérico para filtrar
+cor_resultado <- cor_resultado %>%
+  mutate(
+    p_adj_num   = p.adjust(p_valor, method = "BH"),
+    sig         = case_when(
+      p_adj_num < 0.001 ~ "***",
+      p_adj_num < 0.01  ~ "**",
+      p_adj_num < 0.05  ~ "*",
+      TRUE              ~ ""
+    ),
+    p_valor_fmt = formatC(p_valor,   format = "e", digits = 2),
+    p_adj_fmt   = formatC(p_adj_num, format = "e", digits = 2)
+  )
+
+# Índices de filas por categoría
+etiq <- cor_resultado$Etiqueta
+
+g1_ini <- which(etiq == "Edad (años)")
+g1_fin <- which(etiq == "Edad al diagnóstico (años)")
+g2_ini <- which(etiq == "SLEDAI-2K")
+g2_fin <- which(etiq == "SLICC-DI")
+g3_ini <- which(etiq == "PCR (mg/L)")
+g3_fin <- which(etiq == "Creatinina (mg/dL)")
+g4_ini <- which(etiq == "Colesterol total (mg/dL)")
+g4_fin <- which(etiq == "Lipoproteína(a) (mg/dL)")
+g5_ini <- which(etiq == "Glucosa (mg/dL)")
+g5_fin <- which(etiq == "HOMA-B")
+g6_ini <- which(etiq == "C3 (mg/dL)")
+g6_fin <- which(etiq == "Proteínas totales (g/dL) †")
+g7_ini <- which(etiq == "IFN-α (pg/mL)")
+g7_fin <- which(etiq == "BAFF (pg/mL) †")
+
+# Tabla
+cor_resultado %>%
+  select(Etiqueta, N, rho, p_valor_fmt, p_adj_fmt, sig) %>%
+  kable(
+    caption   = "**Tabla 3.** Correlaciones de Spearman entre el IFN-score de 72 ISGs y las variables continuas clínicas, bioquímicas y proteómicas. FDR: corrección de Benjamini-Hochberg.",
+    col.names = c("Variable", "N", "ρ Spearman", "p-valor", "p-adj (FDR)", "Sig."),
+    align     = "lccccc"
+  ) %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+    full_width        = FALSE,
+    font_size         = 13
+  ) %>%
+  pack_rows("Características demográficas",    g1_ini, g1_fin) %>%
+  pack_rows("Índices de actividad y daño",     g2_ini, g2_fin) %>%
+  pack_rows("Analítica general",               g3_ini, g3_fin) %>%
+  pack_rows("Perfil lipídico",                 g4_ini, g4_fin) %>%
+  pack_rows("Glucosa e insulina",              g5_ini, g5_fin) %>%
+  pack_rows("Complemento y hepática",          g6_ini, g6_fin) %>%
+  pack_rows("Citocinas plasmáticas",           g7_ini, g7_fin) %>%
+  footnote(
+    general = paste0(
+      "ρ: coeficiente de correlación de Spearman. ",
+      "p-adj: p-valor ajustado por FDR (Benjamini-Hochberg). ",
+      "Sig.: * p-adj < 0.05; ** p-adj < 0.01; *** p-adj < 0.001. ",
+      "† Variables con porcentaje elevado de datos faltantes (> 70%); interpretar con cautela."
+    ),
+    general_title = "Nota: "
+  )
+```
+
+El hallazgo más destacado es la correlación muy fuerte entre IFN-score e IFN-α sérico (ρ = 0.856, p-adj < 0.001), que confirma la validez proteómica de la firma transcriptómica. Las correlaciones positivas y significativas con los índices de actividad SLEDAI-2K (ρ = 0.182, p-adj = 0.016) y SLE-DAS (ρ = 0.196, p-adj = 0.008) indican que una mayor activación de la vía IFN tipo I se asocia a mayor actividad clínica de la enfermedad. El SLICC-DI (ρ = 0.129) mostró una tendencia en la misma dirección, aunque no alcanzó significación estadística tras la corrección por FDR (p-adj = 0.136), lo que podría reflejar el carácter acumulativo e irreversible del daño orgánico respecto a la actividad inflamatoria puntual.
+
+Las correlaciones negativas con edad (ρ = −0.274) y edad al diagnóstico (ρ = −0.233) son consistentes con lo observado en el Bloque 2, reforzando la asociación entre firma IFN elevada y debut precoz de la enfermedad. La asociación negativa con HDL (ρ = −0.229) y Apo A-I (ρ = −0.213) apunta a un perfil lipídico más aterogénico en pacientes con mayor activación de la vía IFN tipo I, lo que tiene relevancia para el riesgo cardiovascular en LES.
+
+## Correlograma
+
+El heatmap de una columna ordena las variables de menor a mayor rho, con la escala de color divergente azul–blanco–rojo y las estrellas de significación FDR
+
+```{r Correlaciones con IFN-score, fig.height=8, fig.width=8}
+cor_sig <- cor_resultado %>%
+  filter(p_adj_num < 0.05) %>%
+  mutate(Etiqueta = factor(Etiqueta, levels = Etiqueta[order(rho)]))
+
+n_neg <- sum(cor_sig$rho < 0)
+
+ggplot(cor_sig, aes(x = 1, y = Etiqueta, fill = rho)) +
+  geom_tile(color = "white", linewidth = 0.3, height = 0.6) +
+  geom_text(aes(label = paste0(round(rho, 2), " ", sig)),
+            size = 3.5, color = "black", fontface = "bold") +
+  geom_hline(yintercept = n_neg + 0.5,
+             linetype = "dashed", color = "grey30", linewidth = 0.7) +
+  scale_fill_gradientn(
+    colours = c("#2166ac", "#92c5de", "#f7f7f7", "#f4a582", "#d6604d", "#b2182b"),
+    limits  = c(-1, 1),
+    name    = "ρ Spearman"
+  ) +
+  scale_x_continuous(breaks = NULL, expand = c(0, 0)) +
+  scale_y_discrete(expand = c(0.02, 0)) +
+  labs(
+    title    = "Correlaciones con IFN-score (72 ISGs)",
+    subtitle = "Solo variables con p-adj < 0.05 (FDR Benjamini-Hochberg)\n* p-adj < 0.05   ** p-adj < 0.01   *** p-adj < 0.001",
+    x        = NULL,
+    y        = NULL
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title       = element_text(face = "bold", size = 14, hjust = 0.5),
+    plot.subtitle    = element_text(color = "grey40", size = 9, hjust = 0.5),
+    axis.text.y      = element_text(size = 10),
+    axis.text.x      = element_blank(),
+    panel.grid       = element_blank(),
+    legend.position  = "bottom",
+    legend.key.width = unit(2, "cm"),
+    plot.margin      = margin(10, 30, 10, 10)
+  )
+```
+
+# Bloque 3 – Regresión logística: predictores de la clasificación IFN-high
+
+Con el objetivo de identificar los determinantes independientes de la activación de la firma de interferón tipo I, acontinuación se ajustaron modelos de regresión logística binaria tomando como variable respuesta la clasificación IFN-high vs. IFN-low. El análisis se realizó en dos etapas: en primer lugar, un **modelo univariable** para cada variable candidata, seleccionada a partir de los resultados significativos del Bloque 1; en segundo lugar, un **modelo multivariable** que incluirá conjuntamente las variables con p-adj < 0.05 en el análisis univariable, con el fin de identificar los predictores independientes tras ajuste mutuo. Los resultados se expresaron como **odds ratio (OR)** con intervalo de confianza al 95% (IC 95%), obtenido por perfil de verosimilitud. Se aplicó corrección por comparaciones múltiples mediante el método de Benjamini-Hochberg (FDR) sobre los p-valores del modelo univariable.
+
+## Modelo univariable
+
+```{r regresion-univariable}
+vars_uni <- c(
+  "edad", "edadiag", "sledai", "sledas", "slicc",
+  "hdl", "apoa1", "IFNapgml", "IFNgpgml", "IL2pgml", "got"
+)
+
+etiquetas_uni <- c(
+  edad     = "Edad (años)",
+  edadiag  = "Edad al diagnóstico (años)",
+  sledai   = "SLEDAI-2K",
+  sledas   = "SLE-DAS",
+  slicc    = "SLICC-DI",
+  hdl      = "HDL (mg/dL)",
+  apoa1    = "Apo A-I (mg/dL)",
+  IFNapgml = "IFN-α (pg/mL)",
+  IFNgpgml = "IFN-γ (pg/mL)",
+  IL2pgml  = "IL-2 (pg/mL)",
+  got      = "GOT/AST (U/L)"
+)
+
+df <- df %>%
+  mutate(ifn_bin = ifelse(ifn_grupo == "IFN-high", 1, 0))
+
+uni_resultado <- map_dfr(vars_uni, function(v) {
+  formula <- as.formula(paste("ifn_bin ~", v))
+  modelo  <- glm(formula, data = df, family = binomial)
+
+  ci      <- suppressMessages(confint(modelo))
+  coefs   <- summary(modelo)$coefficients
+
+  OR      <- exp(coefs[v, "Estimate"])
+  CI_low  <- exp(ci[v, 1])
+  CI_high <- exp(ci[v, 2])
+  p_val   <- coefs[v, "Pr(>|z|)"]
+
+  tibble(
+    Variable = v,
+    Etiqueta = etiquetas_uni[v],
+    N        = nobs(modelo),
+    OR       = round(OR, 3),
+    CI_low   = round(CI_low, 3),
+    CI_high  = round(CI_high, 3),
+    p_valor  = p_val
+  )
+})
+
+uni_resultado <- uni_resultado %>%
+  mutate(
+    p_adj = p.adjust(p_valor, method = "BH"),
+    sig   = case_when(
+      p_adj < 0.001 ~ "***",
+      p_adj < 0.01  ~ "**",
+      p_adj < 0.05  ~ "*",
+      TRUE          ~ ""
+    ),
+    IC_95       = paste0("[", CI_low, "–", CI_high, "]"),
+    p_valor_fmt = formatC(p_valor, format = "e", digits = 2),
+    p_adj_fmt   = formatC(p_adj,   format = "e", digits = 2)
+  )
+
+uni_resultado %>%
+  select(Etiqueta, N, OR, IC_95, p_valor_fmt, p_adj_fmt, sig) %>%
+  kable(
+    caption   = "**Tabla 4.** Regresión logística univariable. Variable respuesta: grupo IFN-high vs. IFN-low.",
+    col.names = c("Variable", "N", "OR", "IC 95%", "p-valor", "p-adj (FDR)", "Sig."),
+    align     = "lcccccc"
+  ) %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+    full_width        = FALSE,
+    font_size         = 13
+  ) %>%
+  footnote(
+    general = paste0(
+      "OR: odds ratio. IC 95%: intervalo de confianza al 95% (perfil de verosimilitud). ",
+      "p-adj: corrección FDR (Benjamini-Hochberg). ",
+      "Sig.: * p-adj < 0.05; ** p-adj < 0.01; *** p-adj < 0.001. ",
+      "Variable respuesta: IFN-high = 1, IFN-low = 0."
+    ),
+    general_title = "Nota: "
+  )
+```
+
+El análisis de regresión logística univariable identifican varios factores
+asociados de forma significativa con la pertenencia al grupo IFN-high
+(Tabla 4). 
+
+La edad y la edad al diagnóstico muestran una asociación inversa con el
+grupo IFN-high, sugiriendo que los pacientes más jóvenes presentan con
+mayor frecuencia una firma interferón elevada, hallazgo consistente con
+la literatura previa en LES. Los índices de actividad (SLEDAI-2K) y daño
+acumulado (SLICC-DI) se asocian positivamente con el grupo IFN-high,
+lo que refuerza el papel del sistema interferón tipo I en la
+fisiopatología de la enfermedad. El perfil lipídico, representado por
+HDL y Apo A-I, muestra una asociación inversa, coherente con la
+disfunción lipídica antiinflamatoria descrita en pacientes con firma
+interferón activa. El IFN-α sérico es el predictor univariable más
+potente (OR = 3.835), lo que es esperable dado su papel central como
+biomarcador de la vía JAK-STAT mediada por interferón tipo I.
+
+### Consideraciones sobre IL-2
+
+La IL-2 mostró un OR extremadamente elevado (OR = 53904; IC 95%
+[381.655–12.852.076]) con escasa precisión, lo que constituye un
+artefacto estadístico y no un efecto biológico real. Este fenómeno se
+explica por la combinación de tres factores: (i) una muestra reducida
+con datos disponibles (N = 178, frente a 251 del resto de variables),
+debida a un elevado número de valores perdidos (n = 73); (ii) una
+distribución marcadamente sesgada hacia la derecha, con valores extremos
+en ambos grupos. Por estos motivos, la IL-2 fue excluida del modelo multivariable.
+
+```{r Distribución de IL-2}
+# Valores perdidos por grupo
+df %>%
+  group_by(ifn_grupo) %>%
+  summarise(
+    N_total  = n(),
+    N_validos = sum(!is.na(IL2pgml)),
+    N_NA     = sum(is.na(IL2pgml)),
+    Pct_NA   = round(100 * mean(is.na(IL2pgml)), 1)
+  ) %>%
+  kable(
+    caption   = "**Tabla 5.** Valores perdidos de IL-2 por grupo.",
+    col.names = c("Grupo", "N total", "Válidos", "Perdidos", "% Perdidos"),
+    align     = "lcccc"
+  ) %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"),
+                full_width = FALSE, font_size = 13)
+
+# Histograma por grupo
+ggplot(df %>% filter(!is.na(IL2pgml)), aes(x = IL2pgml, fill = ifn_grupo)) +
+  geom_histogram(bins = 30, alpha = 0.7, color = "white") +
+  facet_wrap(~ ifn_grupo, ncol = 2) +
+  labs(
+    title    = "Distribución de IL-2 (pg/mL) por grupo IFN",
+    subtitle = "Nótese el sesgo positivo marcado en ambos grupos",
+    x        = "IL-2 (pg/mL)",
+    y        = "Frecuencia"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "none")
+```
+
+## Modelo multivariable
+
+Con el objetivo de identificar los predictores independientes de la
+pertenencia al grupo IFN-high, se construyó un modelo de regresión
+logística multivariable incluyendo las variables que resultaron
+significativas en el análisis univariable (p-adj < 0.05). Se descaron las
+redundancias por colinealidad. De los pares colineales identificados
+—edad/edad al diagnóstico y HDL/Apo A-I— se mantuvieron `edad` y `hdl`
+por su mayor relevancia clínica directa y su menor variabilidad en la
+muestra. Las variables SLE-DAS, GOT/AST e IL-2 se han excluido por
+ausencia de significación estadística ajustada, artefacto numérico o
+muestra insuficiente, respectivamente. 
+
+Finalmente el análisis multivariable se realizó sobre las variables **edad**,
+**SLEDAI-2K**, **SLICC-DI**, **HDL**, **IFN-α** e **IFN-γ**. Dado que la muestra presenta
+valores perdidos en algunas variables, el modelo se ajustó sobre los
+pacientes con datos completos en todas las covariables (N = 240).
+
+La selección final de variables se realizó mediante un procedimiento
+*backward stepwise* basado en el criterio de información de Akaike
+(AIC), que elimina iterativamente las variables que no mejoran el ajuste
+global del modelo. Tras este proceso, el modelo reducido retuvo tres
+predictores independientes: **edad**, **SLICC-DI** e **IFN-α** (Tabla 6).
+
+```{r regresion-multivariable-reducido}
+# Eliminar NAs de las variables del modelo antes de ajustar
+vars_modelo <- c("ifn_bin", "edad", "sledai", "slicc", "hdl", "IFNapgml", "IFNgpgml")
+df_modelo   <- df %>% select(all_of(vars_modelo)) %>% na.omit()
+
+cat("N disponible para el modelo:", nrow(df_modelo), "\n")
+
+# Modelo completo
+modelo_completo <- glm(
+  ifn_bin ~ edad + sledai + slicc + hdl + IFNapgml + IFNgpgml,
+  data   = df_modelo,
+  family = binomial
+)
+
+# Selección backward por AIC
+modelo_reducido <- step(modelo_completo, direction = "backward", trace = FALSE)
+
+# Resumen
+cat("Variables retenidas:\n")
+print(formula(modelo_reducido))
+cat("\nAIC completo:", round(AIC(modelo_completo), 1), "\n")
+cat("AIC reducido:", round(AIC(modelo_reducido), 1), "\n")
+
+# Extracción de resultados
+vars_red <- names(coef(modelo_reducido))
+vars_red <- vars_red[vars_red != "(Intercept)"]
+
+etiquetas_todas <- c(
+  edad     = "Edad (años)",
+  sledai   = "SLEDAI-2K",
+  slicc    = "SLICC-DI",
+  hdl      = "HDL (mg/dL)",
+  IFNapgml = "IFN-α (pg/mL)",
+  IFNgpgml = "IFN-γ (pg/mL)"
+)
+
+ci    <- suppressMessages(confint(modelo_reducido))
+coefs <- summary(modelo_reducido)$coefficients
+
+multi_red <- map_dfr(vars_red, function(v) {
+  tibble(
+    Etiqueta = etiquetas_todas[v],
+    OR       = round(exp(coefs[v, "Estimate"]), 3),
+    CI_low   = round(exp(ci[v, 1]), 3),
+    CI_high  = round(exp(ci[v, 2]), 3),
+    p_valor  = coefs[v, "Pr(>|z|)"]
+  )
+}) %>%
+  mutate(
+    p_adj     = p.adjust(p_valor, method = "BH"),
+    sig       = case_when(
+      p_adj < 0.001 ~ "***",
+      p_adj < 0.01  ~ "**",
+      p_adj < 0.05  ~ "*",
+      TRUE          ~ ""
+    ),
+    IC_95       = paste0("[", CI_low, "–", CI_high, "]"),
+    p_valor_fmt = formatC(p_valor, format = "e", digits = 2),
+    p_adj_fmt   = formatC(p_adj,   format = "e", digits = 2)
+  )
+
+multi_red %>%
+  select(Etiqueta, OR, IC_95, p_valor_fmt, p_adj_fmt, sig) %>%
+  kable(
+    caption   = "**Tabla 6.** Regresión logística multivariable (modelo reducido por backward stepwise). Variable respuesta: grupo IFN-high vs. IFN-low.",
+    col.names = c("Variable", "OR", "IC 95%", "p-valor", "p-adj (FDR)", "Sig."),
+    align     = "lccccc"
+  ) %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+    full_width        = FALSE,
+    font_size         = 13
+  ) %>%
+  footnote(
+    general = paste0(
+      "OR: odds ratio ajustado. IC 95%: intervalo de confianza al 95% (perfil de verosimilitud). ",
+      "p-adj: corrección FDR (Benjamini-Hochberg). ",
+      "Sig.: * p-adj < 0.05; ** p-adj < 0.01; *** p-adj < 0.001. ",
+      "Selección de variables: backward stepwise por AIC. ",
+      "AIC modelo completo: ", round(AIC(modelo_completo), 1), "; ",
+      "AIC modelo reducido: ", round(AIC(modelo_reducido), 1), ". ",
+      "N = ", nrow(df_modelo), "."
+    ),
+    general_title = "Nota: "
+  )
+```
+
+Los resultados del modelo final indican que el **IFN-α sérico** es el
+predictor más potente e independiente de la firma interferón elevada
+(OR = 3.618; IC 95% [2.410–6.016]; p-adj < 0.001): por cada unidad
+adicional de IFN-α, la odds de pertenecer al grupo IFN-high se
+multiplica por 3.6, independientemente del resto de covariables. El
+**SLICC-DI** también se asoció de forma independiente con el grupo
+IFN-high (OR = 1.423; IC 95% [1.026–1.958]; p-adj = 0.030), de modo
+que cada punto adicional de daño orgánico acumulado incrementa la odds
+en un 42%. Por último, la **edad** mostró un efecto protector leve pero
+significativo (OR = 0.959; IC 95% [0.925–0.993]; p-adj = 0.030): por
+cada año adicional de edad, la odds de IFN-high se reduce
+aproximadamente un 4%, lo que sugiere que los pacientes más jóvenes
+presentan con mayor frecuencia una activación interferón elevada.
+
+Las variables SLEDAI-2K, HDL e IFN-γ, pese a mostrar asociación
+significativa en el análisis univariable, no fueron retenidas en el
+modelo multivariable, lo que indica que su efecto en el análisis
+univariable estaba mediado o confundido por las variables retenidas,
+especialmente por IFN-α. La reducción del AIC entre el modelo completo
+y el modelo reducido confirma que el modelo parsimonioso ofrece un
+ajuste equivalente con menor complejidad.
+
+# Bloque 4 - Regresión lineal múltiple del IGS-score
+
+Con el objetivo de identificar los factores clínicos y bioquímicos que
+predicen de forma independiente la magnitud del IGS-score continuo, se
+construyó un modelo de regresión lineal múltiple tomando como variable
+respuesta el IGS-score de 72 genes estimulados por interferón
+(*ifnscore72*). A diferencia del análisis de regresión logística
+presentado en el bloque anterior, que modela la probabilidad de
+pertenecer al grupo IFN-high, este modelo aborda la variación continua
+del score, capturando la gradación biológica de la respuesta interferón
+en el conjunto de la cohorte.
+
+Para la modelización multivariable del IFN‑score (ifnscore72) se consideraron inicialmente como predictores las variables clínicas y bioquímicas que mostraron asociación significativa (p-adj < 0.05) en los análisis univariables. (Bloque 2) con correlación de Spearman: edad, edad al diagnóstico, SLEDAI‑2K, SLE‑DAS, HDL, Apo A‑I, GOT/AST, IFN‑α, IFN‑γ e IL‑2.
+
+La selección final de variables se
+realizó mediante un procedimiento de eliminación hacia atrás
+(*backward stepwise*) basado en el criterio de información de Akaike
+(AIC), eliminando iterativamente las variables cuya exclusión no
+incrementa el AIC del modelo. El análisis se realizó sobre los pacientes
+con datos completos en todas las covariables (*complete case analysis*).
+Los resultados se expresan como coeficientes beta (β) con intervalos de
+confianza al 95%, R² ajustado y p-valores corregidos por FDR mediante
+el método de Benjamini-Hochberg.
+
+```{r setup-regresion-multivariable, message=FALSE, warning=FALSE}
+# Variables candidatas para el modelo lineal del IFN-score
+vars_multi <- c(
+  "edad",      # Edad
+  "edadiag",   # Edad al diagnóstico
+  "sledai",    # SLEDAI-2K
+  "sledas",    # SLE-DAS
+  "hdl",
+  "apoa1",
+  "got",
+  "IFNapgml",  # IFN-α
+  "IFNgpgml",  # IFN-γ
+  "IL2pgml"    # IL-2
+)
+
+etiquetas_multi <- c(
+  edad      = "Edad (años)",
+  edadiag   = "Edad al diagnóstico (años)",
+  sledai    = "SLEDAI-2K",
+  sledas    = "SLE-DAS",
+  hdl       = "HDL (mg/dL)",
+  apoa1     = "Apo A-I (mg/dL)",
+  got       = "GOT/AST (U/L)",
+  IFNapgml  = "IFN-α (pg/mL)",
+  IFNgpgml  = "IFN-γ (pg/mL)",
+  IL2pgml   = "IL-2 (pg/mL)"
+)
+
+# Dataset base para la regresión lineal: IFN-score + candidatas
+df_lm <- df %>%
+  dplyr::select(ifnscore72, dplyr::all_of(vars_multi)) %>%
+  na.omit()
+
+cat("Dimensiones df_lm:", nrow(df_lm), "filas x", ncol(df_lm), "columnas\n")
+```
+
+Previamente al ajuste del modelo se evaluó la colinealidad entre predictores (X–X) mediante la matriz de correlaciones de Pearson. En este análisis se identificaron pares con correlación extremadamente alta (|r| > 0.99), concretamente edad al diagnóstico con HDL (r = 0.998) e IFN‑α con IFN‑γ (r = 0.997), por lo que se decidió excluir edad al diagnóstico e IFN‑γ del modelo para evitar problemas de inestabilidad en las estimaciones.
+
+```{r colinealidad-XX, message=FALSE, warning=FALSE}
+# Matriz de correlaciones entre predictores (X–X)
+df_check <- df_lm %>%
+  dplyr::select(dplyr::all_of(vars_multi))
+
+cor_matrix <- cor(df_check, use = "complete.obs", method = "pearson")
+
+pares_colineales <- which(
+  abs(cor_matrix) > 0.99 & upper.tri(cor_matrix),
+  arr.ind = TRUE
+)
+
+if (nrow(as.data.frame(pares_colineales)) > 0) {
+  library(dplyr)
+  info_pares <- as.data.frame(pares_colineales) %>%
+    mutate(
+      var1 = rownames(cor_matrix)[row],
+      var2 = colnames(cor_matrix)[col],
+      r    = cor_matrix[cbind(row, col)]
+    ) %>%
+    select(var1, var2, r)
+
+  cat("Pares con colinealidad alta (|r| > 0.99) entre las X:\n")
+  print(info_pares)
+} else {
+  cat("No se han detectado pares con |r| > 0.99 entre las X.\n")
+}
+```
+
+Adicionalmente, se examinó la correlación de cada candidata con el IFN‑score (X–Y). Edad cronológica y GOT/AST mostraron una correlación casi perfecta con el IFN‑score (r = −0.998 y r = −0.973, respectivamente), generando modelos prácticamente deterministas con R² ≈ 1 e imposibilitando el uso del criterio de información de Akaike (AIC) para la selección de variables. Por este motivo, edad y GOT se excluyeron del modelo multivariable principal y se mantuvieron únicamente en los análisis descriptivos y de correlación.
+
+```{r correlacion-YX, message=FALSE, warning=FALSE}
+# Correlación de cada candidata con el IFN-score (X–Y)
+cors_yx <- sapply(vars_multi, function(v) {
+  cor(df_lm$ifnscore72, df_lm[[v]], use = "complete.obs", method = "pearson")
+})
+
+round(cors_yx, 3)
+```
+
+Tras estas exclusiones, el conjunto final de variables candidatas estuvo formado por SLEDAI‑2K, SLE‑DAS, HDL, Apo A‑I, IFN‑α e IL‑2. Sobre este conjunto se ajustó un modelo de regresión lineal múltiple con el IFN‑score como variable dependiente y se aplicó un procedimiento de selección hacia atrás basado en el AIC. El modelo final retuvo cinco predictores independientes (SLEDAI‑2K, SLE‑DAS, HDL, IFN‑α e IL‑2), con un R² ajustado del 31,3%, lo que indica que estos parámetros explican una proporción relevante de la variabilidad del IFN‑score en la cohorte analizada.
+
+```{r seleccionar-variables-finales, message=FALSE, warning=FALSE}
+# Exclusión por colinealidad X–X:
+#   - edadiag casi idéntica a hdl
+#   - IFNg casi idéntica a IFN-α
+vars_excluir_xx <- c("edadiag", "IFNgpgml")
+
+# Exclusión por asociación casi determinista con Y (X–Y):
+#   - edad y GOT extremadamente correlacionadas con ifnscore72
+vars_excluir_yx <- c("edad", "got")
+
+vars_excluir <- c(vars_excluir_xx, vars_excluir_yx)
+
+vars_multi_final <- setdiff(vars_multi, vars_excluir)
+
+cat("Variables excluidas (X–X o X–Y extremas):\n")
+print(vars_excluir)
+
+cat("\nVariables candidatas finales para el modelo multivariable del IFN-score:\n")
+print(vars_multi_final)
+```
+
+```{r modelo-multivariable-ifnscore, message=FALSE, warning=FALSE}
+# Dataset definitivo para el modelo
+df_lm_final <- df %>%
+  dplyr::select(ifnscore72, dplyr::all_of(vars_multi_final)) %>%
+  na.omit()
+
+cat("Dimensiones df_lm_final:", nrow(df_lm_final), "filas x", ncol(df_lm_final), "columnas\n")
+
+# Modelo lineal completo
+form_multi_completa <- as.formula(
+  paste("ifnscore72 ~", paste(vars_multi_final, collapse = " + "))
+)
+
+modelo_lm_completo <- lm(form_multi_completa, data = df_lm_final)
+cat("\nR² modelo completo:", summary(modelo_lm_completo)$r.squared, "\n")
+
+# Selección hacia atrás por AIC
+modelo_lm_backward <- step(
+  modelo_lm_completo,
+  direction = "backward",
+  trace = FALSE
+)
+
+cat("\nFórmula del modelo final tras backward:\n")
+print(formula(modelo_lm_backward))
+
+summary(modelo_lm_backward)
+```
+
+```{r tabla-modelo-lineal-ifnscore, message=FALSE, warning=FALSE}
+# Datos del modelo final (los que has pegado)
+tabla_lin <- data.frame(
+  Variable   = c("SLEDAI-2K",
+                 "SLE-DAS",
+                 "HDL (mg/dL)",
+                 "IFN-α (pg/mL)",
+                 "IL-2 (pg/mL)"),
+  beta       = c(0.079, -0.084, -0.011, 0.044, 2.463),
+  ic_low     = c(0.007, -0.149, -0.018, 0.028, 1.156),
+  ic_high    = c(0.151, -0.019, -0.004, 0.059, 3.769),
+  p_valor    = c(3.22e-02, 1.22e-02, 2.94e-03, 6.30e-08, 2.72e-04),
+  p_adj_fdr  = c(3.22e-02, 1.53e-02, 4.90e-03, 3.15e-07, 6.80e-04)
+)
+
+# Formateo columnas
+tabla_lin$`β`       <- sprintf("%.3f", tabla_lin$beta)
+tabla_lin$`IC 95%`  <- paste0(sprintf("%.3f", tabla_lin$ic_low), " ; ",
+                              sprintf("%.3f", tabla_lin$ic_high))
+tabla_lin$`p-valor` <- formatC(tabla_lin$p_valor,  format = "e", digits = 2)
+tabla_lin$`p-adj FDR` <- formatC(tabla_lin$p_adj_fdr, format = "e", digits = 2)
+
+# Columna de significación
+tabla_lin$Sig. <- cut(
+  tabla_lin$p_adj_fdr,
+  breaks = c(-Inf, 0.001, 0.01, 0.05, Inf),
+  labels = c("***", "**", "*", "")
+)
+
+tabla_lin_out <- tabla_lin[, c("Variable","β","IC 95%","p-valor","p-adj FDR","Sig.")]
+
+kable(
+  tabla_lin_out,
+  caption = "**Tabla 7.** Regresión lineal multivariable del IFN-score (72 ISGs).",
+  align   = "lccccc"
+) %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+    full_width        = FALSE,
+    font_size         = 13
+  ) %>%
+  footnote(
+    general = paste0(
+      "Modelo de regresión lineal múltiple. β: coeficiente de regresión; ",
+      "IC 95%: intervalo de confianza al 95%; ",
+      "p-adj FDR: p-valor ajustado por Benjamini-Hochberg. ",
+      "Sig.: * p-adj < 0.05; ** p-adj < 0.01; *** p-adj < 0.001. ",
+      "R² ajustado = 0.313."
+    ),
+    general_title = "Nota: "
+  )
+```
+
+```{r diagnostico-modelo, fig.height=4, fig.width=8, message=FALSE, warning=FALSE}
+par(mfrow = c(1, 2))
+
+# Residuos vs valores ajustados
+plot(
+  modelo_lm_backward$fitted.values,
+  resid(modelo_lm_backward),
+  xlab = "Valores ajustados",
+  ylab = "Residuos",
+  main = "Residuos vs ajustados"
+)
+abline(h = 0, col = "red", lty = 2)
+
+# Gráfico Q-Q de residuos
+qqnorm(resid(modelo_lm_backward),
+       main = "Q-Q plot de los residuos")
+qqline(resid(modelo_lm_backward), col = "red", lty = 2)
+
+par(mfrow = c(1, 1))
+```
+
+El análisis gráfico de los residuos del modelo lineal mostró una dispersión aproximadamente aleatoria en torno a cero en el gráfico de residuos frente a valores ajustados, sin patrones claros de curvatura ni heterocedasticidad marcada. El gráfico Q‑Q de los residuos estandarizados evidenció un alineamiento cercano a la recta teórica, con desviaciones solo ligeras en las colas, lo que sugiere un cumplimiento aceptable de los supuestos de normalidad y homocedasticidad en la cohorte analizada.
+
+# Bloque 5. Rendimiento diagnóstico. Curvas ROC y AUC
+
+La variable binaria de respuesta IFN‑high/IFN‑low se definió a partir del IFN‑score continuo de 72 ISGs, dicotomizado según su distribución en la cohorte. Dado que esta clasificación deriva directamente del IFN‑score, dicho marcador no se incluyó como predictor en el análisis de curvas ROC para evitar problemas de circularidad. En su lugar, se evaluó la capacidad discriminativa de biomarcadores clínicos y séricos independientes —IFN‑α plasmático (pg/mL), SLEDAI‑2K, C3 y C4 séricos— para reproducir la categorización basada en la firma transcriptómica.
+
+Para cada biomarcador se construyó una curva Receiver Operating Characteristic (ROC), tomando como variable dependiente la clasificación IFN‑high (1) frente a IFN‑low (0) y como variable independiente el valor continuo del marcador. Se estimó el área bajo la curva (AUC) con su intervalo de confianza al 95% y se compararon las AUC entre biomarcadores mediante el test de DeLong para muestras emparejadas, asumiendo un nivel de significación bilateral de α = 0,05.
+
+Como comparadores se seleccionaron, de forma preespecificada, varios biomarcadores de relevancia clínica y biológica en el LES: el IFN‑α sérico (IFNapgml), el índice de actividad global SLEDAI‑2K y las fracciones del complemento C3 y C4. El IFN‑α sérico se incluyó por tratarse del efector proteico directo de la vía de interferón tipo I y por haber mostrado la correlación más estrecha con el IFN‑score en los análisis previos. SLEDAI‑2K se seleccionó como índice compuesto de actividad inflamatoria ampliamente validado en LES, mientras que C3 y C4 representan biomarcadores serológicos clásicos de actividad inmunológica en la práctica clínica rutinaria. Esta selección limitada de comparadores permite contrastar el rendimiento diagnóstico de la firma transcriptómica frente a los marcadores actualmente utilizados sin incurrir en un número excesivo de comparaciones difícil de interpretar.
+
+```{r roc-delong-simple, message=FALSE, warning=FALSE, fig.width=6, fig.height=6}
+df_roc <- df %>%
+  mutate(
+    ifn_bin = ifelse(ifn_grupo == "IFN-high", 1, 0)
+  ) %>%
+  select(ifn_bin, IFNapgml, sledai, c3, c4) %>%
+  na.omit()
+
+cat("N disponible para ROC:", nrow(df_roc), "\n")
+
+roc_ifna   <- roc(df_roc$ifn_bin, df_roc$IFNapgml,  quiet = TRUE)
+roc_sledai <- roc(df_roc$ifn_bin, df_roc$sledai,    quiet = TRUE)
+roc_c3     <- roc(df_roc$ifn_bin, df_roc$c3,        quiet = TRUE)
+roc_c4     <- roc(df_roc$ifn_bin, df_roc$c4,        quiet = TRUE)
+
+tabla_auc <- tibble(
+  Marcador = c("IFN-α sérico", "SLEDAI-2K", "C3 sérico", "C4 sérico"),
+  AUC      = c(auc(roc_ifna), auc(roc_sledai), auc(roc_c3), auc(roc_c4))
+)
+
+tabla_auc %>%
+  mutate(
+    AUC_fmt = sprintf("%.3f", AUC)
+  ) %>%
+  select(Marcador, AUC_fmt) %>%
+  kable(
+    caption   = "**Tabla 8.** AUC de las curvas ROC de biomarcadores séricos e índice de actividad para la clasificación IFN-high.",
+    col.names = c("Marcador", "AUC"),
+    align     = "lc"
+  ) %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+    full_width        = FALSE,
+    font_size         = 13
+  )
+
+plot(roc_ifna,
+     col  = col_high,
+     lwd  = 2.2,
+     main = "Curvas ROC para la clasificación IFN-high",
+     legacy.axes = TRUE)
+
+plot(roc_sledai, add = TRUE, col = "#636363", lwd = 2, lty = 2)
+plot(roc_c3,     add = TRUE, col = "#9e9e9e", lwd = 2, lty = 3)
+plot(roc_c4,     add = TRUE, col = "#bdbdbd", lwd = 2, lty = 4)
+
+legend(
+  "bottomright",
+  legend = c(
+    paste0("IFN-α (AUC = ",     round(auc(roc_ifna), 2), ")"),
+    paste0("SLEDAI-2K (AUC = ", round(auc(roc_sledai), 2), ")"),
+    paste0("C3 (AUC = ",        round(auc(roc_c3), 2), ")"),
+    paste0("C4 (AUC = ",        round(auc(roc_c4), 2), ")")
+  ),
+  col = c(col_high, "#636363", "#9e9e9e", "#bdbdbd"),
+  lwd = 2,
+  lty = c(1, 2, 3, 4),
+  bty = "n"
+)
+```
+
+# Bloque 6. Visualización integrativa
+
+Con el fin de sintetizar los principales hallazgos del análisis estadístico, se generaron representaciones gráficas integrativas que combinan información sobre (i) las diferencias entre subgrupos IFN‑high e IFN‑low, (ii) la relación continua entre el IFN‑score y los biomarcadores séricos y (iii) el impacto relativo de cada predictor en los modelos multivariables (regresión logística y lineal). Estas figuras permiten una interpretación más intuitiva de la asociación entre la firma transcriptómica de interferón tipo I, la actividad clínica y los biomarcadores bioquímicos y proinflamatorios.
+
+## Scatter plots IFN‑score vs predictores clave
+
+Esta figura resume los coeficientes del modelo lineal multivariable del IFN‑score en forma de forest plot, mostrando el incremento o descenso esperado del IFN‑score por unidad de cada predictor y sus intervalos de confianza al 95%.
+
+```{r IFN‑score vs predictores clave, message=FALSE, warning=FALSE, fig.width=10, fig.height=6}
+# Dataset con todas las variables de interés
+df_scatter <- df %>%
+  dplyr::select(ifnscore72, sledai, sledas, hdl, IFNapgml, IL2pgml) %>%
+  na.omit()
+
+# Función auxiliar con p-valor en subtítulo
+scatter_con_p <- function(data, xvar, xlabel, titulo){
+  f   <- as.formula(paste("ifnscore72 ~", xvar))
+  mod <- lm(f, data = data)
+  p   <- glance(mod)$p.value
+  p_lab <- ifelse(p < 0.001, "p < 0.001", paste0("p = ", signif(p, 2)))
+
+  ggplot(data, aes_string(x = xvar, y = "ifnscore72")) +
+    geom_point(alpha = 0.7, color = "grey40", size = 1.8) +
+    geom_smooth(method = "lm", se = TRUE,
+                color = col_high, fill = col_high_fill, alpha = 0.20) +
+    labs(
+      x = xlabel,
+      y = "IFN-score (72 ISGs)",
+      title    = titulo,
+      subtitle = p_lab
+    ) +
+    theme_minimal(base_size = 12) +
+    theme(
+      plot.title    = element_text(face = "bold"),
+      plot.subtitle = element_text(color = "grey30", size = 9)
+    )
+}
+
+# Biomarcadores séricos
+p_ifna <- scatter_con_p(df_scatter, "IFNapgml",
+                        "IFN-α sérico (pg/mL)",
+                        "IFN-score vs IFN-α")
+
+p_il2  <- scatter_con_p(df_scatter, "IL2pgml",
+                        "IL-2 sérica (pg/mL)",
+                        "IFN-score vs IL-2")
+
+p_hdl  <- scatter_con_p(df_scatter, "hdl",
+                        "HDL (mg/dL)",
+                        "IFN-score vs HDL")
+
+# Índices de actividad
+p_sledai <- scatter_con_p(df_scatter, "sledai",
+                          "SLEDAI-2K",
+                          "IFN-score vs SLEDAI-2K")
+
+p_sledas <- scatter_con_p(df_scatter, "sledas",
+                          "SLE-DAS",
+                          "IFN-score vs SLE-DAS")
+
+ggpubr::ggarrange(
+  p_ifna, p_il2, p_hdl,
+  p_sledai, p_sledas,
+  ncol = 3, nrow = 2,
+  labels = c("A", "B", "C", "D", "E")
+)
+```
+
+IFN‑α e IL‑2 se comportan como biomarcadores séricos directamente relacionados con la activación de la firma de interferón tipo I.HDL se asocia inversamente con dicha activación, compatible con un perfil lipídico más aterogénico en los pacientes con mayor actividad de la vía de IFN. En relación con los scores de actividad, se observa una asociación lineal positiva significativa con SLEDAI‑2K (p = 0,0013), mientras que la relación con SLE‑DAS presenta una tendencia similar, aunque con una significación marginal (p = 0,052)
+
+## Forest plot del modelo lineal del IFN‑score
+
+Forest plot del modelo de regresión lineal múltiple del IFN‑score (72 ISGs), mostrando los coeficientes β ajustados e intervalos de confianza al 95% para cada predictor incluido en el modelo final. 
+
+```{r forest-lineal, message=FALSE, warning=FALSE, fig.width=6, fig.height=4}
+# Extraer coeficientes del modelo final
+tidy_lin <- broom::tidy(modelo_lm_backward, conf.int = TRUE) %>%
+  filter(term != "(Intercept)") %>%
+  mutate(
+    Variable = recode(term,
+      sledai   = "SLEDAI-2K",
+      sledas   = "SLE-DAS",
+      hdl      = "HDL (mg/dL)",
+      apoa1    = "Apo A-I (mg/dL)",
+      IFNapgml = "IFN-α (pg/mL)",
+      IL2pgml  = "IL-2 (pg/mL)"
+    ),
+    beta   = estimate,
+    ic_low = conf.low,
+    ic_high= conf.high
+  ) %>%
+  arrange(beta) %>%            # ordenar de menor a mayor efecto
+  mutate(Variable = factor(Variable, levels = Variable))
+
+ggplot(tidy_lin, aes(x = beta, y = Variable)) +
+  geom_point(size = 2.5, color = col_high) +
+  geom_errorbarh(aes(xmin = ic_low, xmax = ic_high),
+                 height = 0.2, color = col_high) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey60") +
+  labs(
+    x = "Coeficiente β sobre IFN-score (72 ISGs)",
+    y = NULL,
+    title = "Forest plot del modelo lineal multivariable del IFN-score"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title   = element_text(face = "bold"),
+    axis.text.y  = element_text(size = 10)
+  )
+```
+
+Los coeficientes positivos (por ejemplo IFN‑α, IL‑2, SLEDAI‑2K) indican un aumento del IFN‑score con valores más altos de la variable, mientras que los coeficientes negativos (como HDL) reflejan una asociación inversa.
+
+## Forest plot de la regresión logística IFN‑high
+
+Forest plot del modelo de regresión logística multivariable para la clasificación IFN‑high, representando las odds ratio (OR) ajustadas e intervalos de confianza al 95 %. Las OR > 1 indican mayor probabilidad de pertenecer al grupo IFN‑high por unidad de incremento del predictor (p. ej., IFN‑α, IL‑2, SLEDAI‑2K), mientras que las OR < 1 (como HDL) reflejan un efecto protector.
+
+```{r forest-logistico-ifnhigh, message=FALSE, warning=FALSE, fig.width=6, fig.height=4}
+# Extraer coeficientes del modelo reducido como OR
+tidy_logit <- broom::tidy(modelo_reducido, conf.int = TRUE, exponentiate = TRUE) %>%
+  filter(term != "(Intercept)") %>%
+  mutate(
+    Variable = recode(term,
+      edad     = "Edad (años)",
+      sledai   = "SLEDAI-2K",
+      slicc    = "SLICC-DI",
+      hdl      = "HDL (mg/dL)",
+      IFNapgml = "IFN-α (pg/mL)",
+      IFNgpgml = "IFN-γ (pg/mL)"
+    ),
+    OR     = estimate,
+    ic_low = conf.low,
+    ic_high= conf.high
+  ) %>%
+  arrange(OR) %>%                                 # ordenar por tamaño de OR
+  mutate(Variable = factor(Variable, levels = Variable))
+
+ggplot(tidy_logit, aes(x = OR, y = Variable)) +
+  geom_point(size = 2.5, color = col_high) +
+  geom_errorbarh(aes(xmin = ic_low, xmax = ic_high),
+                 height = 0.2, color = col_high) +
+  geom_vline(xintercept = 1, linetype = "dashed", color = "grey60") +
+  scale_x_log10() +
+  labs(
+    x = "Odds ratio de IFN-high (escala log10)",
+    y = NULL,
+    title = "Forest plot del modelo logístico multivariable (IFN-high vs IFN-low)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title  = element_text(face = "bold"),
+    axis.text.y = element_text(size = 10)
+  )
+```
+
+---
+
+# Construcción del dataset para integración multi-ómica
+
+Una vez completados los análisis de asociación bivariante, multivariable y de discriminación diagnóstica, todos los resultados derivados —incluyendo las tablas de comparación IFN-high/IFN-low, los coeficientes de correlación de Spearman, los modelos de regresión logística y lineal, y las curvas ROC— Se crea un dataset que incluye los índices de actividad y daño, las variables séricas y analíticas, el IFN-score principal (72 genes ISG), la clasificación IFN-high/low y la expresión relativa de los 72 ISG. 
+
+Este dataset consolidado constituye la estructura de datos de partida para la integración multiómica posterior mediante DIABLO.
+
+```{r guardar-dataset-correlacion-bivariada, message=FALSE, warning=FALSE}
+
+DataSet_CorrelacionBivariada <- df
+
+saveRDS(DataSet_CorrelacionBivariada, "DataSet_CorrelacionBivariada.rds")
+
+cat("  DataSet_CorrelacionBivariada · Guardado\n")
+cat(sprintf("  Archivo : DataSet_CorrelacionBivariada.rds\n"))
+cat(sprintf("  Filas   : %d pacientes LES\n",  nrow(DataSet_CorrelacionBivariada)))
+cat(sprintf("  Columnas: %d variables\n",       ncol(DataSet_CorrelacionBivariada)))
+```

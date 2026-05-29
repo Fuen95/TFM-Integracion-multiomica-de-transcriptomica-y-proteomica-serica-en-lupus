@@ -1,0 +1,922 @@
+---
+title: "Integración multi-ómica de la firma de interferón y biomarcadores séricos en LES"
+subtitle: "Análisis DIABLO (mixOmics) — Integración supervisada respecto a remisión clínica (SLEDAI-2K)"
+author: "Fuensanta Bernal Gómez"
+date: "`r format(Sys.Date(), '%d de %B de %Y')`"
+output:
+  html_document:
+    self_contained: true
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    toc_depth: 3
+    number_sections: true
+    css: estilos.css
+    theme: flatly
+    highlight: tango
+    df_print: paged
+    code_folding: show
+    fig_width: 8
+    fig_height: 5
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo        = TRUE,
+  warning     = FALSE,
+  message     = FALSE,
+  fig.path    = "figuras/Integración multiómica SLEDAI/",  
+  dev         = "png",
+  dpi         = 300,
+  fig.width   = 8,             
+  fig.height  = 5,          
+  fig.align   = "center",
+  bg          = "white",
+  cache       = FALSE
+)
+```
+```{r rutas}
+ruta_fig <- knitr::opts_chunk$get("fig.path")
+dir.create(ruta_fig, showWarnings = FALSE, recursive = TRUE)
+```
+
+# Introducción
+
+En este documento se presenta un análisis de **integración multi-ómica supervisada** en pacientes con lupus eritematoso sistémico (LES) mediante el método **DIABLO** (*Data Integration Analysis for Biomarker discovery using Latent cOmponents*) implementado en el paquete `mixOmics` de R [@Rohart2017; @Singh2019].
+
+La variable respuesta se define en términos de **remisión clínica basada en SLEDAI-2K**: se considera **remisión** a los pacientes con SLEDAI-2K = 0 y **actividad clínica** a aquellos con SLEDAI-2K ≥ 1, de acuerdo con la categorización clásica del índice de actividad [@Gladman2002]. De este modo, el modelo DIABLO busca componentes latentes que discriminen entre pacientes en remisión completa y pacientes con cualquier grado de actividad clínica.
+
+Se integran dos bloques ómicos medidos en la misma cohorte de pacientes LES:
+
+- **Bloque transcriptómico:** expresión de 72 genes estimulados por interferón (ISGs) cuantificados mediante NanoString nCounter, normalizados y transformados a escala log2.
+- **Bloque proteómico sérico:** panel de citocinas (IFN-α, IFN-γ, IL-2, IL-6, IL-8, BAFF), factores del complemento (C3, C4), marcadores de inflamación (PCR), función renal (creatinina), perfil lipídico (colesterol, triglicéridos, HDL, LDL, Apo A-I, Apo B, cociente Apo B/A-I, lipoproteína(a)) y parámetros hepático-nutricionales (GOT, GPT, GGT, proteínas totales).
+
+El objetivo es identificar **componentes latentes multi-ómicos** que discriminen remisión frente a actividad clínica, y caracterizar qué genes IFN-dependientes y qué proteínas séricas contribuyen de forma más prominente a estos ejes integrativos, así como su relación con otros índices de actividad y con el IFN-score continuo.
+
+El análisis se estructura en los siguientes bloques:
+
+- **Bloque 1 — Preparación de datos:** extracción, depuración e imputación de los bloques ómicos; evaluación de la completitud; transformación y escalado.
+- **Bloque 2 — Diseño de DIABLO y sintonización de hiperparámetros:** especificación de la matriz de diseño inter-bloque y optimización de `keepX` mediante validación cruzada M-fold.
+- **Bloque 3 — Ajuste del modelo DIABLO final:** obtención de los componentes latentes, *loadings* por bloque y métricas de rendimiento.
+- **Bloque 4 — Evaluación del modelo:** tasa de error de clasificación, AUC por componente y curvas ROC multiclase.
+- **Bloque 5 — Visualización integrativa:** `plotIndiv`, `plotArrow`, `plotLoadings`, `circosPlot` y `cimDiablo` para la interpretación biológica.
+- **Bloque 6 — Exportación del dataset multi-ómico integrado** para análisis posteriores (modelo LASSO predictivo).
+
+---
+
+# Carga de paquetes
+
+```{r paquetes}
+if (!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+
+if (!requireNamespace("mixOmics", quietly = TRUE))
+  BiocManager::install("mixOmics")
+
+paquetes_cran <- c(
+  "dplyr", "tidyr", "ggplot2", "knitr", "kableExtra",
+  "tibble", "forcats", "scales", "purrr", "broom", "ggpubr",
+  "RColorBrewer", "reshape2", "VIM"
+)
+
+for (pkg in paquetes_cran) {
+  if (!requireNamespace(pkg, quietly = TRUE)) install.packages(pkg)
+  library(pkg, character.only = TRUE)
+}
+
+library(mixOmics)
+
+# Evitar conflictos de nombres
+select <- dplyr::select
+filter <- dplyr::filter
+```
+
+---
+
+# Paleta de colores
+
+```{r paleta}
+col_high      <- "#cb181d"   # rojo oscuro — grupo Actividad
+col_low       <- "#fc9272"   # rojo claro  — grupo Remisión
+col_highfill  <- "#fb6a4a"   # fill Actividad
+col_lowfill   <- "#fee0d2"   # fill Remisión
+
+# Paleta para componentes DIABLO (2 componentes)
+col_comp <- c("#4dac26", "#92c5de")   # verde — Comp 1 / azul claro — Comp 2
+
+# Colores por grupo
+col_diablo <- c("Remision" = col_low, "Activo" = col_high)
+```
+
+---
+
+# Bloque 1. Preparación de datos
+
+## Importación del dataset
+
+Se importa el objeto `DataSet_CorrelacionBivariada.rds` generado en el documento anterior (*Asociación de la firma transcriptómica de interferón tipo I con índices de actividad y biomarcadores séricos en LES.Rmd*), que contiene las variables clínicas, las citocinas séricas, la expresión relativa de cada gen, el IFN-score de 72 ISGs, la clasificación IFN-high/IFN-low para los pacientes LES.
+
+```{r importar_datos}
+df <- readRDS("DataSet_CorrelacionBivariada.rds")
+
+cat("Dimensiones:", nrow(df), "filas x", ncol(df), "columnas\n")
+```
+
+## Selección de la cohorte LES y definición de remisión
+
+```{r definir_remision}
+# Filtrar pacientes con SLEDAI-2K disponible
+
+df <- df %>% filter(!is.na(sledai))
+
+# Variable binaria: Remisión (SLEDAI-2K = 0) vs Activo (SLEDAI-2K >= 1)
+
+df <- df %>%
+  mutate(
+    remision_sledai = case_when(
+      sledai == 0 ~ "Remision",
+      TRUE        ~ "Activo"
+    ),
+    remision_sledai = factor(remision_sledai, levels = c("Remision", "Activo"))
+  )
+
+cat("Distribución remisión vs activo:\n")
+print(table(df$remision_sledai))
+```
+
+Esta variable `remision_sledai` será la **variable respuesta Y** del modelo DIABLO.
+
+## Definición de los bloques ómicos
+
+DIABLO requiere que cada bloque sea una **matriz numérica** con muestras en filas y variables en columnas, con los mismos identificadores de fila en todos los bloques y en el vector de respuesta.
+
+### Bloque transcriptómico (ISGs)
+
+```{r definir_isgs}
+# --- ISGs del panel NanoString (72 genes, escala log2 normalizada) -----------
+isg_genes <- c(
+  "BDCA1","BST2","CEACAM1","CMPK2","CXCL10","CXCL9","DDX60","DNAJA1",
+  "EIFAK2","EPSTI1","GBP1","GBP4","GBP5","HERC5","HERC6","IFI16","IFI27",
+  "IFI35","IFI44","IFI44L","IFI6","IFIH1","IFIT1","IFIT2","IFIT3","IFIT5",
+  "IFITM1","IFITM3","IL1RN","IL6","IRF1","IRF7","ISG15","ISG20","LAMP3",
+  "LGALS3BP","LY6E","MX1","MX2","MYD88","NC0A7","NT5C3B","OAS1","OAS2",
+  "OAS3","OASL","PARP12","PARP9","PHF11","PLSCR1","PRKR","PSMB9","RSAD2",
+  "RTP4","SAMD9L","SERPING1","SIGLEC1","SOCS1","SP100","SP140","SPATS2L",
+  "STAT1","TAP1","TNFAIP6","TNFSF10","TRIM38","TYK2","UB2L6","UNC93B1",
+  "USP18","XAF1","ZBP1"
+)
+
+# Verificar disponibilidad de genes en el dataset
+isg_disponibles <- intersect(isg_genes, names(df))
+cat("Genes ISG disponibles en el dataset:", length(isg_disponibles), "de", length(isg_genes), "\n")
+```
+
+### Bloque proteómico sérico
+
+```{r definir_proteinas}
+# Bloque proteómico recomendado para DIABLO (19 variables, sin duplicados ni ruido)
+proteinas_sericas <- c(
+  "IFNapgml", "IFNgpgml", "IL2pgml", "IL6pgml", "IL8pgml", "baffpgml",
+  "c3", "c4",
+  "pcrmgl", "creatinina",
+  "colesterol", "trigli", "hdl", "ldl", "apoa1", "apob", "apoba",
+  "lipoprotein_a",
+  "got", "gpt", "ggt", "prot_tot"
+)
+
+proteinas_disponibles <- intersect(proteinas_sericas, names(df))
+cat("Proteínas séricas disponibles:", length(proteinas_disponibles), "\n")
+cat("→", paste(proteinas_disponibles, collapse = ", "), "\n")
+```
+
+## Evaluación de datos faltantes en el bloque proteómico
+
+```{r missing_proteinas}
+# Porcentaje de valores faltantes por proteína
+missing_prot <- df %>%
+  dplyr::select(all_of(proteinas_disponibles)) %>%
+  summarise(across(everything(), ~ round(100 * mean(is.na(.)), 1))) %>%
+  pivot_longer(everything(), names_to = "Variable", values_to = "Pct_NA") %>%
+  arrange(desc(Pct_NA))
+
+etiq_prot <- c(
+  pcrmgl        = "PCR (mg/L)",
+  creatinina    = "Creatinina (mg/dL)",
+  colesterol    = "Colesterol total (mg/dL)",
+  trigli        = "Triglicéridos (mg/dL)",
+  hdl           = "HDL (mg/dL)",
+  ldl           = "LDL (mg/dL)",
+  apoa1         = "Apo A-I (mg/dL)",
+  apob          = "Apo B (mg/dL)",
+  apoba         = "Cociente Apo B/A-I",
+  lipoprotein_a  = "Lipoproteína(a) (mg/dL)",
+  c3            = "C3 (mg/dL)",
+  c4            = "C4 (mg/dL)",
+  got           = "GOT/AST (U/L)",
+  gpt           = "GPT/ALT (U/L)",
+  ggt           = "GGT (U/L)",
+  prot_tot      = "Proteínas totales (g/dL)",
+  IFNapgml      = "IFN-α (pg/mL)",
+  IFNgpgml      = "IFN-γ (pg/mL)",
+  IL2pgml       = "IL-2 (pg/mL)",
+  IL6pgml       = "IL-6 (pg/mL)",
+  IL8pgml       = "IL-8 (pg/mL)",
+  baffpgml      = "BAFF (pg/mL)"
+)
+
+missing_prot <- missing_prot %>%
+  mutate(Etiqueta = etiq_prot[Variable])
+
+kable(missing_prot %>% dplyr::select(Etiqueta, Pct_NA),
+      caption = "Tabla 1. Porcentaje de datos faltantes en el bloque proteómico sérico.",
+      col.names = c("Variable", "% Faltantes"),
+      align = "lc") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = FALSE, font_size = 13) %>%
+  footnote(general = paste0(
+    "Proteínas con >70% de datos faltantes se excluyen del bloque proteómico. ",
+    "La imputación de valores faltantes restantes se realiza mediante el método kNN (k=5)."),
+    general_title = "Nota")
+```
+
+## Imputación de datos faltantes y construcción de matrices
+
+Se excluyen del bloque proteómico las variables con más del 70% de datos faltantes. Para las variables incluidas con porcentaje de faltantes moderado-bajo, se aplica **imputación por k-vecinos más próximos** (kNN, k = 5) implementada en el paquete `VIM`.
+
+```{r construir_bloques}
+# Umbral de exclusión: > 70% faltantes
+prot_excluir <- missing_prot %>% filter(Pct_NA > 70) %>% pull(Variable)
+prot_incluir <- setdiff(proteinas_disponibles, prot_excluir)
+
+cat("Variables proteómicas excluidas (>70% NA):", length(prot_excluir), "\n")
+if (length(prot_excluir) > 0) cat(" →", paste(prot_excluir, collapse = ", "), "\n")
+cat("Variables proteómicas incluidas:", length(prot_incluir), "\n")
+cat(" →", paste(prot_incluir, collapse = ", "), "\n")
+
+# Filtrar pacientes con Y definida
+
+df_diablo <- df %>% filter(!is.na(remision_sledai))
+
+cat("\nN total con remision_sledai disponible:", nrow(df_diablo), "\n")
+
+stopifnot("id2" %in% names(df_diablo))
+
+# Bloque transcriptómico
+bloque_isg <- df_diablo %>%
+  select(all_of(isg_disponibles)) %>%
+  as.matrix()
+rownames(bloque_isg) <- df_diablo$id2
+
+# Bloque proteómico
+bloque_prot_raw <- df_diablo %>%
+  select(all_of(prot_incluir)) %>%
+  as.matrix()
+rownames(bloque_prot_raw) <- df_diablo$id2
+
+# Imputación kNN (k=5) si hay valores faltantes
+if (any(is.na(bloque_prot_raw))) {
+  cat("\nImputando valores faltantes en bloque proteómico (kNN, k = 5)...\n")
+  ids_originales <- rownames(bloque_prot_raw)
+  bloque_prot_imp <- VIM::kNN(as.data.frame(bloque_prot_raw), k = 5, imp_var = FALSE)
+  bloque_prot_imp <- as.matrix(bloque_prot_imp)
+  rownames(bloque_prot_imp) <- ids_originales
+} else {
+  bloque_prot_imp <- bloque_prot_raw
+}
+
+bloque_prot <- log2(bloque_prot_imp + 1)
+rownames(bloque_prot) <- rownames(bloque_prot_imp)
+
+cat("Bloque ISG — dimensiones:", nrow(bloque_isg), "×", ncol(bloque_isg), "\n")
+cat("Bloque proteómico — dimensiones:", nrow(bloque_prot), "×", ncol(bloque_prot), "\n")
+
+# Variable respuesta Y
+Y <- df_diablo$remision_sledai
+names(Y) <- df_diablo$id2
+
+cat("\nDistribución de Y (Remisión vs Activo):\n")
+print(table(Y))
+
+# Verificación de alineación
+stopifnot(identical(rownames(bloque_isg), rownames(bloque_prot)))
+stopifnot(identical(rownames(bloque_isg), names(Y)))
+
+cat("\n✓ Alineación correcta de muestras en ambos bloques y en Y.\n")
+
+# Lista de bloques
+
+data_list <- list(
+  transcriptomica = bloque_isg,
+  proteomica      = bloque_prot
+)
+```
+
+## Verificación de alineación de muestras
+
+```{r verificar_alineacion}
+# Asegurar orden idéntico de filas en todos los bloques
+stopifnot(identical(rownames(bloque_isg), rownames(bloque_prot)))
+stopifnot(identical(rownames(bloque_isg), names(Y)))
+
+cat("✓ Alineación correcta: todos los bloques tienen", nrow(bloque_isg),
+    "muestras con el mismo orden.\n")
+
+# Lista de bloques para mixOmics
+data_list <- list(
+  transcriptomica = bloque_isg,
+  proteomica      = bloque_prot
+)
+```
+
+---
+
+# Bloque 2. Diseño de DIABLO y sintonización de hiperparámetros
+
+## Especificación de la matriz de diseño
+
+La **matriz de diseño** (*design matrix*) en DIABLO controla la importancia relativa del objetivo supervisado (discriminación entre grupos) frente a la maximización de la correlación entre bloques. Un valor de diseño de **0** maximiza la discriminación entre clases (más conservador; recomendado para clasificación). Un valor de **1** maximiza la correlación entre bloques (más exploratorio). Se recomienda comenzar con diseño = 0 y ajustarlo si se busca priorizar la covarianza inter-bloque [@Singh2019].
+
+```{r diseno}
+# Diseño: 0 → máxima discriminación (recomendado para clasificación)
+#         0.1-0.5 → balance entre discriminación y correlación inter-bloque
+design_matrix <- matrix(
+  data     = 0.1,
+  nrow     = length(data_list),
+  ncol     = length(data_list),
+  dimnames = list(names(data_list), names(data_list))
+)
+diag(design_matrix) <- 0  # diagonal = 0 (obligatorio en DIABLO)
+
+cat("Matriz de diseño especificada:\n")
+print(design_matrix)
+```
+
+## Selección preliminar del número de componentes
+
+Se ajusta un modelo DIABLO preliminar con un número generoso de componentes (ncomp = 5) para identificar el número óptimo mediante validación cruzada M-fold (M = 5, 10 repeticiones).
+
+```{r ncomp_prelim}
+# Modelo preliminar con keepX amplio para evaluar ncomp
+ncomp_test <- 5
+keepX_inicial <- list(
+  transcriptomica = rep(20, ncomp_test),
+  proteomica      = rep(10, ncomp_test)
+)
+
+set.seed(123)
+diablo_prelim <- block.splsda(
+  X      = data_list,
+  Y      = Y,
+  ncomp  = ncomp_test,
+  keepX  = keepX_inicial,
+  design = design_matrix
+)
+
+cat("Modelo preliminar ajustado con ncomp =", ncomp_test, "\n")
+```
+
+```{r perf_ncomp, fig.cap="Figura 1. Tasa de error de clasificación balanceado (BER) por componente (validación cruzada M-fold, M = 5, 10 repeticiones).", cache=TRUE}
+set.seed(123)
+perf_prelim <- perf(
+  diablo_prelim,
+  validation  = "Mfold",
+  folds       = 5,
+  nrepeat     = 10,
+  progressBar = FALSE
+)
+
+# Extraer la lista de matrices de error (WeightedVote)
+werr <- perf_prelim$WeightedVote.error.rate
+
+# BER global (fila 'Overall.BER') por componente y distancia
+ber_centroids <- werr$centroids.dist["Overall.BER", 1:ncomp_test]
+ber_maxdist   <- werr$max.dist      ["Overall.BER", 1:ncomp_test]
+
+# Tabla de errores por componente
+err_comp <- data.frame(
+  Componente     = 1:ncomp_test,
+  BER_centroides = round(ber_centroids, 3),
+  BER_max_dist   = round(ber_maxdist,   3)
+)
+
+kable(err_comp,
+      caption   = "Tabla 2. Tasa de error de clasificación balanceado (BER) por número de componentes (validación cruzada M-fold, M = 5, 10 repeticiones).",
+      col.names = c("N.º Componentes", "BER centroides", "BER max.dist"),
+      align     = "ccc") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = FALSE, font_size = 13) %>%
+  footnote(general = "BER = Balanced Error Rate. Se selecciona un número de componentes que equilibre bajo BER y parsimonia del modelo.",
+           general_title = "Nota")
+
+# Gráfico de error por componente
+plot(perf_prelim)
+title(main = "Tasa de error por componente — Validación cruzada M-fold")
+
+# Selección del ncomp óptimo (mínimo BER con centroid.dist)
+ncomp_opt <- which.min(ber_centroids)
+cat("\\n→ Número óptimo de componentes seleccionado: ncomp =", ncomp_opt, "\\n")
+```
+
+El BER se mantuvo en torno al 45–48% independientemente del número de componentes, lo que indica una capacidad discriminativa limitada de los bloques transcriptómico y proteómico para separar remisión (SLEDAI‑2K = 0) de actividad clínica (SLEDAI‑2K ≥ 1). Se seleccionó un modelo con dos componentes latentes por parsimonia e interés interpretativo.
+
+```{r}
+# Se fija ncomp = 2 por parsimonia e interpretabilidad del modelo (mixOmics).
+ncomp_opt <- 2
+cat("Número de componentes fijado para el modelo final DIABLO: ncomp =", ncomp_opt, "\n")
+```
+
+## Sintonización de keepX mediante validación cruzada
+
+El parámetro `keepX` controla el **número de variables seleccionadas** en cada bloque y componente. Se optimiza mediante la función `tune.block.splsda()` con validación cruzada M-fold (M = 5, 10 repeticiones) y el criterio de Máxima Distancia Centroides.
+
+```{r tune_keepX, cache=TRUE}
+# Rangos de búsqueda para keepX
+test_keepX <- list(
+  transcriptomica = c(10, 15, 20, 25, 30),
+  proteomica      = c(5, 8, 10, 12, 15)
+)
+
+set.seed(123)
+tune_diablo <- tune.block.splsda(
+  X           = data_list,
+  Y           = Y,
+  ncomp       = ncomp_opt,
+  test.keepX  = test_keepX,
+  design      = design_matrix,
+  validation  = "Mfold",
+  folds       = 5,
+  nrepeat     = 10,
+  dist        = "centroids.dist",
+  progressBar = FALSE
+)
+
+# keepX óptimo seleccionado
+keepX_opt <- tune_diablo$choice.keepX
+keepX_opt
+
+# Tabla resumen de sintonización
+kable(
+  data.frame(
+    Bloque   = names(keepX_opt),
+    Comp_1   = sapply(keepX_opt, function(x) x[1]),
+    Comp_2   = sapply(keepX_opt, function(x) ifelse(length(x) >= 2, x[2], NA)),
+    check.names = FALSE
+  ),
+  caption   = "Tabla 3. Número óptimo de variables seleccionadas por bloque y componente (keepX).",
+  col.names = c("Bloque", "Comp 1", "Comp 2"),
+  align     = "lcc"
+) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = FALSE, font_size = 13) %>%
+  footnote(general = "Selección mediante tune.block.splsda() con CV M-fold (M = 5, 10 repeticiones) y criterio centroids.dist.",
+           general_title = "Nota")
+```
+
+El procedimiento de sintonización de parámetros con `tune.block.splsda()` identificó como configuración óptima un modelo relativamente parco en número de variables seleccionadas por componente (Tabla 3).
+
+---
+
+# Bloque 3. Ajuste del modelo DIABLO final
+
+```{r modelo_final}
+set.seed(123)
+diablo_final <- block.splsda(
+  X      = data_list,
+  Y      = Y,
+  ncomp  = ncomp_opt,
+  keepX  = keepX_opt,
+  design = design_matrix
+)
+
+cat("Modelo DIABLO final ajustado.\n")
+cat("N componentes:", ncomp_opt, "\n")
+cat("N muestras:", nrow(bloque_isg), "\n")
+cat("Clases Y:", paste(levels(Y), collapse = " / "), "\n")
+```
+
+## Varianza explicada
+
+```{r varianza}
+# Función auxiliar: varianza explicada por bloque y componente
+extraer_varianza <- function(modelo, bloques = names(modelo$prop_expl_var)) {
+  purrr::map_dfr(
+    bloques,
+    function(blk) {
+      vexp <- modelo$prop_expl_var[[blk]]
+      tibble::tibble(
+        Bloque     = blk,
+        Componente = paste0("Comp ", seq_along(vexp)),
+        Var_expl   = round(vexp * 100, 2),
+        Var_acum   = round(cumsum(vexp) * 100, 2)
+      )
+    }
+  )
+}
+
+# ── Tabla 4: Varianza explicada por bloque ──────────────────────────────────
+expl_var <- extraer_varianza(diablo_final)
+
+kable(
+  expl_var,
+  caption   = "Tabla 4. Varianza explicada (%) por componente y bloque en el modelo DIABLO final.",
+  col.names = c("Bloque", "Componente", "Var. explicada (%)", "Var. acumulada (%)"),
+  align     = "lccc"
+) %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed"),
+    full_width        = FALSE,
+    font_size         = 13
+  ) %>%
+  footnote(
+    general       = "Varianza explicada por cada componente latente en el espacio de cada bloque ómico.",
+    general_title = "Nota"
+  )
+```
+
+El bloque de respuesta (Y) muestra un 100 % de varianza explicada por el primer componente, lo que es esperable en variables de clase y se debe al modo en que mixOmics calcula la varianza sobre la matriz indicadora de las categorías, sin que deba interpretarse literalmente el valor acumulado superior al 100 % [@Rohart2017; @Singh2019; @mixOmicsExplVar]. 
+
+## Variables seleccionadas por bloque
+
+```{r loadings}
+# Función auxiliar: extraer loadings de un bloque y componente concretos
+extraer_loadings <- function(modelo, bloque, comp, n_top = 20) {
+  # Loadings del bloque (matriz: variables x componentes)
+  ld_mat <- modelo$loadings[[bloque]]
+  
+  # Vector de loadings del componente indicado
+  ld_vec <- ld_mat[, comp]
+  
+  # Nos quedamos solo con variables seleccionadas (loading != 0)
+  ld_vec <- ld_vec[ld_vec != 0]
+  
+  # Construir data.frame ordenado por |loading|
+  ld_df <- data.frame(
+    Variable    = names(ld_vec),
+    Loading     = round(as.numeric(ld_vec), 4),
+    Loading_abs = round(abs(as.numeric(ld_vec)), 4),
+    stringsAsFactors = FALSE
+  )
+  ld_df[order(-ld_df$Loading_abs), ][1:min(n_top, nrow(ld_df)), ]
+}
+
+# ── Tabla 4A: Top 15 ISGs, componente 1 ─────────────────────────────────────
+tab_isg_c1 <- extraer_loadings(
+  modelo = diablo_final,
+  bloque = "transcriptomica",
+  comp   = 1,
+  n_top  = 15
+)
+
+kable(tab_isg_c1,
+      caption   = "Tabla 4A. Top 15 ISGs seleccionados en el Componente 1 (bloque transcriptómico).",
+      col.names = c("Gen ISG", "Loading", "Abs.Loading"),
+      align     = "lcc") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = FALSE, font_size = 13)
+
+# ── Tabla 4B: Proteínas séricas, componente 1 ───────────────────────────────
+
+etiq_prot_tabla <- c(
+  IFNapgml      = "IFN-α", IFNgpgml = "IFN-γ", IL2pgml = "IL-2",
+  IL6pgml       = "IL-6",  IL8pgml  = "IL-8", baffpgml = "BAFF",
+  c3            = "C3",     c4       = "C4",
+  pcrmgl        = "PCR (mg/L)", creatinina = "Creatinina (mg/dL)",
+  colesterol    = "Colesterol total (mg/dL)", trigli = "Triglicéridos (mg/dL)",
+  hdl           = "HDL (mg/dL)", ldl = "LDL (mg/dL)",
+  apoa1         = "Apo A-I (mg/dL)", apob = "Apo B (mg/dL)",
+  apoba         = "Cociente Apo B/A-I", lipoprotein_a = "Lipoproteína(a) (mg/dL)",
+  got           = "GOT/AST (U/L)", gpt = "GPT/ALT (U/L)",
+  ggt           = "GGT (U/L)", prot_tot = "Proteínas totales (g/dL)"
+)
+
+
+
+tab_prot_c1 <- extraer_loadings(diablo_final, "proteomica", 1, n_top = length(prot_incluir))
+
+tab_prot_c1$Etiqueta <- ifelse(tab_prot_c1$Variable %in% names(etiq_prot_tabla),
+                               etiq_prot_tabla[tab_prot_c1$Variable],
+                               tab_prot_c1$Variable)
+
+kable(tab_prot_c1[, c("Etiqueta", "Loading", "Loading_abs")],
+      caption   = "Tabla 5B. Proteínas séricas seleccionadas en el Componente 1 (bloque proteómico).",
+      col.names = c("Proteína sérica", "Loading", "Abs.Loading"),
+      align     = "lcc") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = FALSE, font_size = 13)
+```
+
+El Componente 1 del bloque transcriptómico estuvo fuertemente dominado por genes estimulados por interferón clásicos (Tabla 4A). Los mayores pesos absolutos correspondieron a **IFITM1**, **TRIM38** y **EIFAK2**, seguidos de TAP1, PHF11, PARP9, SPATS2L, SP100, PLSCR1 e IFI16. Este patrón confirma que el primer eje latente sintetiza de forma compacta la activación de la firma IFN-dependiente previamente descrita en la cohorte, en línea con los resultados del análisis de expresión génica y del IFN-score de 72 ISGs [@Rohart2017; @Singh2019]. Cabe destacar que todos los loadings presentan signo negativo, lo que en el contexto de sPLS-DA es arbitrario; lo relevante es la magnitud relativa de los coeficientes, que indica que estos ISGs son los principales contribuyentes transcriptómicos al eje remisión–actividad capturado por el modelo DIABLO.
+
+En el bloque proteómico, el Componente 1 estuvo principalmente influido por los niveles de **C3** y **C4**, que presentaron loadings positivos de gran magnitud, así como por los **triglicéridos**, mientras que **IFN-α** y **BAFF** mostraron coeficientes negativos relevantes (Tabla 5B). Este patrón sugiere que el eje proteómico asociado al Componente 1 integra simultáneamente la activación del complemento (C3, C4), un perfil lipídico más aterogénico (triglicéridos elevados) y la modulación de la señalización interferón-dependiente y de BAFF. Considerando que el modelo DIABLO está supervisado por el estado clínico remisión vs. actividad, estos resultados apuntan a que las variaciones conjuntas de complemento, triglicéridos e IFN-α/BAFF contribuyen al gradiente clínico capturado por el primer componente latente, en coherencia con la asociación previa entre C3/C4, BAFF y actividad de la enfermedad descrita en la cohorte 
+
+---
+
+# Bloque 4. Evaluación del modelo final
+
+## Tasa de error de clasificación y AUC
+
+```{r perf_final, cache=TRUE, fig.cap="Figura 2. Rendimiento del modelo DIABLO final (validación cruzada M-fold, M = 5, 10 repeticiones)."}
+
+# AUROC por bloque y componente (función auroc() de mixOmics)
+set.seed(123)
+auroc_c1 <- auroc(diablo_final, roc.comp = 1, print = FALSE)
+auroc_c2 <- auroc(diablo_final, roc.comp = 2, print = FALSE)
+
+bloques <- names(data_list)
+
+auc1 <- numeric(length(bloques))
+auc2 <- numeric(length(bloques))
+
+for (i in seq_along(bloques)) {
+  blk       <- bloques[i]
+  auc1[[i]] <- round(auroc_c1[[blk]]$comp1[1, "AUC"], 3)
+  auc2[[i]] <- round(auroc_c2[[blk]]$comp2[1, "AUC"], 3)
+}
+
+auc_tabla <- data.frame(
+  Bloque       = bloques,
+  AUC_Comp1    = auc1,
+  AUC_Comp2    = auc2,
+  Interp_Comp1 = ifelse(auc1 >= 0.80, "Bueno",
+                 ifelse(auc1 >= 0.70, "Moderado",
+                 ifelse(auc1 >= 0.60, "Bajo", "Sin discriminación"))),
+  Interp_Comp2 = ifelse(auc2 >= 0.80, "Bueno",
+                 ifelse(auc2 >= 0.70, "Moderado",
+                 ifelse(auc2 >= 0.60, "Bajo", "Sin discriminación")))
+)
+
+kable(auc_tabla,
+      caption   = "Tabla 6. AUROC del modelo DIABLO por bloque ómico y componente.",
+      col.names = c("Bloque", "AUC Comp 1", "AUC Comp 2",
+                    "Interpretación Comp 1", "Interpretación Comp 2"),
+      align     = "lcccc") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = FALSE, font_size = 13) %>%
+  footnote(general = "AUROC calculado mediante auroc() de mixOmics. Bueno ≥ 0,80; Moderado 0,70–0,79; Bajo 0,60–0,69; Sin discriminación < 0,60.",
+           general_title = "Nota")
+```
+
+---
+
+# Bloque 5. Visualización integrativa
+
+## Panel A: Mapa de individuos (plotIndiv)
+
+```{r plotIndiv, fig.cap="Panel A. Representación de los individuos en el espacio de los componentes latentes de DIABLO (Comp 1 y 2) para cada bloque ómico. El color codifica el estado de remisión clínica según SLEDAI. Las elipses representan el intervalo de confianza del 95% de cada grupo.", fig.width=10, fig.height=5}
+
+plotIndiv(
+  diablo_final,
+  ind.names     = FALSE,
+  group         = Y,
+  pch           = c(16, 17)[as.integer(Y)],
+  col.per.group = col_diablo,
+  legend        = TRUE,
+  ellipse       = TRUE,
+  ellipse.level = 0.95,
+  title         = "Panel A — Sample plot por bloque",
+  size.title    = 14,
+  legend.title  = "Remisión SLEDAI"
+)
+
+png(paste0(ruta_fig, "PanelA_SamplePlot.png"), width = 3000, height = 1800, res = 300)
+plotIndiv(
+  diablo_final,
+  ind.names     = FALSE,
+  group         = Y,
+  pch           = c(16, 17)[as.integer(Y)],
+  col.per.group = col_diablo,
+  legend        = TRUE,
+  ellipse       = TRUE,
+  ellipse.level = 0.95,
+  title         = "Panel A — Sample plot por bloque",
+  size.title    = 14,
+  legend.title  = "Remisión SLEDAI"
+)
+dev.off()
+```
+
+## Panel B: plotDiablo — scatter entre bloques + correlación de Pearson
+
+```{r panelB_plotDiablo, fig.cap="Panel B. Scatter plot entre los bloques ómicos (diagonal superior) y correlación de Pearson entre los componentes de cada bloque (diagonal inferior), generado con plotDiablo(). Permite evaluar la concordancia entre los componentes latentes de transcriptómica y proteómica respecto a la variable respuesta.", fig.width=7, fig.height=7}
+plotDiablo(diablo_final,
+           ncomp         = 1,
+           col.per.group = col_diablo,
+           ind.names     = FALSE)
+
+png(paste0(ruta_fig, "PanelB_plotDiablo.png"), width = 2400, height = 2400, res = 300)
+plotDiablo(diablo_final,
+           ncomp         = 1,
+           col.per.group = col_diablo,
+           ind.names     = FALSE)
+dev.off()
+```
+
+## Panel C: Arrow plot
+
+El *arrow plot* representa cada muestra como un vector que conecta su proyección en el bloque transcriptómico (origen) con su proyección en el bloque proteómico (punta). Flechas cortas indican alta correlación inter-bloque para esa muestra.
+
+```{r plotArrow, fig.cap="Panel C. Arrow plot DIABLO. Cada flecha conecta la proyección de una muestra en el bloque transcriptómico (base) con su proyección en el bloque proteómico (punta). Flechas cortas indican alta concordancia inter-bloque.", fig.width=8, fig.height=6}
+plotArrow(
+  diablo_final,
+  ind.names     = FALSE,
+  group         = Y,
+  col.per.group = col_diablo,
+  legend        = TRUE,
+  title         = "Panel C — Arrow plot (Transcriptómica vs Proteómica)",
+  legend.title  = "Remisión SLEDAI"
+)
+
+png(paste0(ruta_fig, "PanelC_ArrowPlot.png"), width = 2400, height = 1800, res = 300)
+plotArrow(
+  diablo_final,
+  ind.names     = FALSE,
+  group         = Y,
+  col.per.group = col_diablo,
+  legend        = TRUE,
+  title         = "Panel C — Arrow plot (Transcriptómica vs Proteómica)",
+  legend.title  = "Remisión SLEDAI"
+)
+dev.off()
+```
+
+## Panel D: Correlación inter-bloque (scores Componente 1)
+
+```{r corr_bloques, fig.cap="Panel D. Correlación de Pearson entre los scores del Componente 1 de los bloques transcriptómico y proteómico. Cada punto representa un paciente, coloreado según su estado de remisión clínica por SLEDAI."}
+sc_isg  <- diablo_final$variates$transcriptomica[, 1]
+sc_prot <- diablo_final$variates$proteomica[, 1]
+
+r_pearson <- round(cor(sc_isg, sc_prot, method = "pearson"), 3)
+
+scores_df <- tibble(
+  ISG_Comp1  = sc_isg,
+  Prot_Comp1 = sc_prot,
+  Grupo      = Y
+)
+
+p_corr <- ggplot(scores_df, aes(x = ISG_Comp1, y = Prot_Comp1, color = Grupo)) +
+  geom_point(size = 2.5, alpha = 0.85) +
+  geom_smooth(method = "lm", se = TRUE, color = "grey30", linetype = "dashed") +
+  scale_color_manual(values = col_diablo, name = "Remision SLEDAI") +
+  labs(title    = "Panel D — Correlacion inter-bloque (Componente 1)",
+       subtitle = paste0("r de Pearson = ", r_pearson),
+       x        = "Score Comp 1 - Bloque ISGs",
+       y        = "Score Comp 1 - Bloque Proteomica") +
+  theme_minimal(base_size = 13) +
+  theme(plot.title      = element_text(face = "bold"),
+        legend.position = "bottom")
+
+print(p_corr)
+ggsave(paste0(ruta_fig, "PanelD_CorrBloques.png"), plot = p_corr,
+       width = 8, height = 6, dpi = 300, bg = "white")
+```
+
+## Panel E: Clustered Image Map (CIM)
+
+El *cimDiablo* es un mapa de calor de las correlaciones entre las variables seleccionadas de todos los bloques
+
+```{r panelE_CIM, fig.cap="Panel E. Mapa de imagen agrupado (CIM, Clustered Image Map) de la firma multi-omica seleccionada en el Componente 1. Las muestras se representan en filas (coloreadas segun el grupo) y las variables seleccionadas en columnas. La agrupacion jerarquica se realizo con distancia euclidea y enlace completo. El gradiente de color indica la intensidad de expresion/concentracion relativa.", fig.width=10, fig.height=8}
+cimDiablo(
+  diablo_final,
+  comp         = 1,
+  row.names    = FALSE,
+  col.names    = TRUE,
+  clust.method = c("complete", "complete"),
+  dist.method  = c("euclidean", "euclidean"),
+  margins      = c(8, 20),
+  title        = "Panel E (SLEDAI) - CIM (Comp 1)"
+)
+
+png(paste0(ruta_fig, "PanelE_CIM.png"), width = 3200, height = 2800, res = 300)
+cimDiablo(
+  diablo_final,
+  comp         = 1,
+  row.names    = FALSE,
+  col.names    = TRUE,
+  clust.method = c("complete", "complete"),
+  dist.method  = c("euclidean", "euclidean"),
+  margins      = c(8, 20),
+  title        = "Panel E (SLEDAI)- CIM (Comp 1)"
+)
+dev.off()
+```
+
+## Panel F: Circos plot
+
+El *circos plot* visualiza las correlaciones entre las variables seleccionadas de los dos bloques en el espacio del componente latente 1. Las líneas conectan pares de variables con correlación (en módulo) superior al umbral especificado.
+
+
+```{r panelF_circos, fig.cap="Panel F. Circos plot de la firma multi-omica. Los enlaces marrones indican correlaciones positivas (r > 0,7) y los negros correlaciones negativas (r < -0,7) entre las variables seleccionadas en el Componente 1. El nombre de cada variable aparece en el cuadrante correspondiente al bloque omico de origen.", fig.width=8, fig.height=8}
+circosPlot(
+  diablo_final,
+  comp           = 1,
+  cutoff         = 0.7,
+  line           = FALSE,
+  color.blocks   = c("#2166ac", "#d6604d"),
+  color.cor      = c("#8B4513", "black"),
+  size.labels    = 1.2,
+  size.variables = 0.8
+)
+
+png(paste0(ruta_fig, "PanelF_Circos.png"), width = 2800, height = 2800, res = 300)
+circosPlot(
+  diablo_final,
+  comp           = 1,
+  cutoff         = 0.7,
+  line           = FALSE,
+  color.blocks   = c("#2166ac", "#d6604d"),
+  color.cor      = c("#8B4513", "black"),
+  size.labels    = 1.2,
+  size.variables = 0.8
+)
+dev.off()
+```
+
+## Panel G: Correlation Circle plot
+
+```{r panelG_corrCircle, fig.cap="Panel G. Grafico de circulo de correlaciones (Correlation Circle plot). Cada punto representa una variable seleccionada (azul: ISGs; rojo: proteinas sericas) proyectada en el espacio de los Componentes 1 y 2 de DIABLO. Las variables proximas al borde exterior del circulo unitario presentan alta correlacion con los componentes latentes.", fig.width=8, fig.height=7}
+plotVar(
+  diablo_final,
+  comp      = c(1, 2),
+  var.names = list(transcriptomica = TRUE, proteomica = TRUE),
+  style     = "graphics",
+  legend    = TRUE,
+  col       = c("#2166ac", "#d6604d"),
+  pch       = c(16, 17),
+  cex       = c(2, 2),
+  title     = "Panel G - Correlation Circle plot (Comp 1 vs 2)"
+)
+
+png(paste0(ruta_fig, "PanelG_CorrCircle.png"), width = 2800, height = 2400, res = 300)
+plotVar(
+  diablo_final,
+  comp      = c(1, 2),
+  var.names = list(transcriptomica = TRUE, proteomica = TRUE),
+  style     = "graphics",
+  legend    = TRUE,
+  col       = c("#2166ac", "#d6604d"),
+  pch       = c(16, 17),
+  cex       = c(2, 2),
+  title     = "Panel G - Correlation Circle plot (Comp 1 vs 2)"
+)
+dev.off()
+```
+
+## Panel H: Relevance Network
+
+```{r panelH_network, fig.cap="Panel H. Red de relevancia de la firma multi-omica. Los nodos representan las variables seleccionadas en el Componente 1 (azul: ISGs; rojo: proteinas sericas). Las aristas conectan pares de variables con correlacion absoluta superior a 0,7. El grosor de la arista es proporcional a la fuerza de la correlacion.", fig.width=10, fig.height=8}
+network(
+  diablo_final,
+  comp        = list(transcriptomica = 1, proteomica = 1),
+  blocks      = c("transcriptomica", "proteomica"),
+  color.node  = c("#2166ac", "#d6604d"),
+  cutoff      = 0.7,
+  shape.node  = c("circle", "rectangle"),
+  size.node   = 0.5,
+  lty.edge    = "solid",
+  interactive = FALSE
+)
+png(paste0(ruta_fig, "PanelH_Network.png"), width = 3200, height = 2800, res = 300)
+network(
+  diablo_final,
+  comp        = list(transcriptomica = 1, proteomica = 1),
+  blocks      = c("transcriptomica", "proteomica"),
+  color.node  = c("#2166ac", "#d6604d"),
+  cutoff      = 0.7,
+  shape.node  = c("circle", "rectangle"),
+  size.node   = 0.5,
+  lty.edge    = "solid",
+  interactive = FALSE
+)
+dev.off()
+```
+
+---
+
+# Bloque 6. Exportación del dataset integrado
+
+```{r exportar}
+# Scores de componentes
+scores_isg  <- as.data.frame(diablo_final$variates$transcriptomica)
+colnames(scores_isg) <- paste0("DIABLO_ISG_Comp", seq_len(ncol(scores_isg)))
+
+scores_prot <- as.data.frame(diablo_final$variates$proteomica)
+colnames(scores_prot) <- paste0("DIABLO_Prot_Comp", seq_len(ncol(scores_prot)))
+
+scores_isg  <- tibble(id2 = rownames(scores_isg))  %>% bind_cols(scores_isg)
+scores_prot <- tibble(id2 = rownames(scores_prot)) %>% bind_cols(scores_prot)
+
+# Unir con df_diablo
+df_final <- df_diablo %>%
+  left_join(scores_isg,  by = "id2") %>%
+  left_join(scores_prot, by = "id2")
+
+cat("Dimensiones del dataset integrado:", nrow(df_final), "filas x", ncol(df_final), "columnas\n")
+
+saveRDS(df_final, "DataSet_Multiomico_SLEDAI.rds")
+cat("\n✓ Objeto guardado como 'DataSet_Multiomico_Remision.rds'\n")
+```
+
+---
+
+

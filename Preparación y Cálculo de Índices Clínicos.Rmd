@@ -1,0 +1,920 @@
+---
+title: "Preparación y Cálculo de Índices Clínicos – LES"
+author: "Fuensanta Bernal Gómez"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    self_contained: true
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    toc_depth: 3
+    number_sections: true
+    css: estilos.css
+    theme: flatly
+    highlight: tango
+    df_print: paged
+    code_folding: show
+    fig_width: 8
+    fig_height: 5
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  fig.path = "figuras/Preparación y Cálculo de Índices Clínicos/",      
+                              # carpeta donde se guardarán
+  dev = "png",                # formato: png, pdf, svg, etc.
+  dpi = 300,                  # resolución
+  fig.width = 9,              # ancho en pulgadas
+  fig.height = 6,             # alto en pulgadas
+  bg = "white"                # fondo blanco
+)
+```
+
+# Introducción
+
+El dataset contiene datos clínicos, analíticos y transcriptómicos de una cohorte de 252 pacientes con Lupus Eritematoso Sistémico (LES), junto con la expresión génica de la firma del interferón del grupo control.
+Este documento describe la importación del dataset DataSet_bruto y el cálculo de los cinco índices clínicos en los pacientes con LES empleados en el estudio: **SLEDAI-2K**, **SLICC/SDI**, **SLE-DAS**, **LLDAS** y **DORIS**.
+Todos los cálculos de los índices clínicos se realizan siguiendo las definiciones
+publicadas en la introducción de este TFM.
+
+---
+
+# Carga de paquetes
+
+```{r paquetes}
+paquetes <- c("readxl", "dplyr", "tidyr", "knitr", "kableExtra", "writexl", "DiagrammeR", "DiagrammeRsvg", "rsvg", "ggplot2")
+
+for (pkg in paquetes) {
+  if (!requireNamespace(pkg, quietly = TRUE)) install.packages(pkg)
+  library(pkg, character.only = TRUE)
+}
+select <- dplyr::select
+filter <- dplyr::filter
+```
+
+---
+
+# Importación del DataSet_bruto
+
+El encabezado real de las variables se encuentra en la **fila 2** del Excel,
+por lo que se omite la primera fila con `skip = 1`.
+
+```{r importacion}
+# ── 1. Leer con skip=2: fila 3 del Excel como cabecera automáticamente ──
+DataSet_bruto <- read_excel("DataSet_Bruto.xlsx",
+                            sheet   = "LES",
+                            skip    = 2,          # salta fila grupos + fila nombres largos
+                            col_names = TRUE,     # fila 3 = nombres cortos como cabecera
+                            col_types = "text",   # todo como texto; se convierte después
+                            .name_repair = "unique")
+
+# ── 2. Eliminar la única columna vacía (columna 242 del Excel) ──
+DataSet_bruto <- DataSet_bruto %>%
+  dplyr::select(-matches("^\\.\\.\\.\\d+$"))   # elimina columnas ...242, etc.
+
+# ── 3. Convertir tipos ──
+DataSet_bruto <- DataSet_bruto %>%
+  mutate(across(-c(id, id2, fechanac, fecha, fechadiag),
+                ~ suppressWarnings(as.numeric(.)))) %>%
+  mutate(
+    fechanac  = as.Date(as.numeric(fechanac),  origin = "1899-12-30"),
+    fecha     = as.Date(as.numeric(fecha),     origin = "1899-12-30"),
+    fechadiag = as.Date(as.numeric(fechadiag), origin = "1899-12-30"),
+    varon1    = factor(varon1, levels = c(0, 1), labels = c("Mujer", "Varón")),
+    les       = factor(les,    levels = c(0, 1), labels = c("Control", "LES"))
+  )
+
+# ── 4. Resumen ──
+cat("Dimensiones totales:", nrow(DataSet_bruto), "pacientes x", ncol(DataSet_bruto), "variables\n")
+cat("Pacientes LES:      ", sum(DataSet_bruto$les == "LES"),     "\n")
+cat("Controles sanos:    ", sum(DataSet_bruto$les == "Control"), "\n")
+```
+
+---
+
+# Cálculo del SLEDAI-2K
+
+El **SLEDAI-2K** (Systemic Lupus Erythematosus Disease Activity Index 2000)
+es la suma de las puntuaciones de 24 manifestaciones clínicas e inmunológicas,
+ponderadas según su gravedad (1, 2, 4 u 8 puntos) [@Gladman2002]. La puntuación total oscila entre 0 y 105 puntos, siendo los umbrales habituales: actividad leve (1–5), moderada (6–10), alta (11–19) y muy alta (≥20). 
+
+```{r sledai}
+# Los ítems item1-item24 ya están ponderados en el dataset DataSet_bruto
+# (convulsión=8, artritis=4, erupción=2, fiebre=1, etc.)
+
+DataSet_bruto <- DataSet_bruto %>%
+  mutate(
+    sledai = rowSums(select(., item1:item24), na.rm = TRUE)
+  )
+
+# Verificación: distribución del SLEDAI-2K en pacientes LES
+DataSet_bruto %>%
+  filter(les == "LES") %>%
+  mutate(
+    categoria_sledai = case_when(
+      sledai == 0            ~ "Remisión (SLEDAI = 0)",
+      sledai >= 1 & sledai <= 5  ~ "Actividad leve (1–5)",
+      sledai >= 6 & sledai <= 10 ~ "Actividad moderada (6–10)",
+      sledai >= 11 & sledai <= 19 ~ "Actividad alta (11–19)",
+      sledai >= 20               ~ "Actividad muy alta (≥20)"
+    ),
+    categoria_sledai = factor(categoria_sledai, levels = c(
+      "Remisión (SLEDAI = 0)",
+      "Actividad leve (1–5)",
+      "Actividad moderada (6–10)",
+      "Actividad alta (11–19)",
+      "Actividad muy alta (≥20)"
+    ))
+  ) %>%
+  count(categoria_sledai, .drop = FALSE) %>%
+  mutate(
+    `%` = round(n / sum(n) * 100, 1),
+    `N (%)` = paste0(n, " (", `%`, "%)")
+  ) %>%
+  select(`Categoría SLEDAI-2K` = categoria_sledai, `N (%)`) %>%
+  kable(
+    caption = "Tabla 1. Distribución de pacientes LES según categoría de actividad (SLEDAI-2K)",
+    align = c("l", "r")
+  ) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+
+```{r, Distribución SLEDAI-2K}
+sledai_df <- data.frame(
+  categoria = factor(c("Remisión\n(= 0)", "Leve\n(1–5)", "Moderada\n(6–10)",
+                        "Alta\n(11–19)", "Muy alta\n(≥20)"),
+                     levels = c("Remisión\n(= 0)", "Leve\n(1–5)", "Moderada\n(6–10)",
+                                "Alta\n(11–19)", "Muy alta\n(≥20)")),
+  n    = c(109, 122, 21, 0, 0),
+  pct  = c(43.3, 48.4, 8.3, 0.0, 0.0),
+  fill = c("#1A5276","#2E86AB","#57B8E8","#D0D0D0","#F0F0F0")
+)
+
+ggplot(sledai_df, aes(x = categoria, y = n, fill = categoria)) +
+  geom_col(width = 0.65, show.legend = FALSE) +
+  geom_text(aes(label = ifelse(n > 0, paste0(n, "\n(", pct, "%)"), "0")),
+            vjust = -0.4, size = 4.2, fontface = "bold", color = "#1A1A2E") +
+  scale_fill_manual(values = sledai_df$fill) +
+  scale_y_continuous(limits = c(0, 155), expand = c(0, 0)) +
+  labs(
+    title    = "Distribución según categoría de actividad SLEDAI-2K",
+    subtitle = "n = 252 pacientes LES | Gladman et al., J Rheumatol. 2002",
+    x        = "Categoría SLEDAI-2K",
+    y        = "N pacientes"
+  ) +
+  theme_classic(base_family = "Arial", base_size = 13) +
+  theme(
+    plot.title    = element_text(face = "bold", size = 14, hjust = 0.5),
+    plot.subtitle = element_text(size = 11, hjust = 0.5, color = "grey40"),
+    axis.text.x   = element_text(size = 11, lineheight = 1.2),
+    axis.text.y   = element_text(size = 11),
+    plot.margin   = margin(20, 20, 20, 20)
+  )
+```
+
+---
+
+# Cálculo del SLICC/SDI
+
+El **SLICC Damage Index (SDI)** cuantifica el daño orgánico acumulado
+irreversible en LES desde el diagnóstico. Se calcula sumando los ítems
+de daño de 12 sistemas orgánicos (ítems sitem3, sitem9, sitem13, sitem19,
+sitem25, sitem30, sitem36, sitem43, sitem47–sitem50), según la fórmula
+publicada [@Gladman1996].
+
+```{r slicc}
+DataSet_bruto <- DataSet_bruto %>%
+  mutate(
+    slicc = sitem3  + sitem9  + sitem13 + sitem19 +
+            sitem25 + sitem30 + sitem36 + sitem43 +
+            sitem47 + sitem48 + sitem49 + sitem50
+  )
+
+DataSet_bruto %>%
+  filter(les == "LES") %>%
+  count(slicc) %>%
+  mutate(`N (%)` = paste0(n, " (", round(n / sum(n) * 100, 1), "%)")) %>%
+  select(slicc, `N (%)`) %>%
+  pivot_wider(
+    names_from  = slicc,
+    values_from = `N (%)`
+  ) %>%
+  kable(
+    caption = "Tabla 2. Distribución de pacientes LES según puntuación de daño orgánico (SLICC/SDI)",
+    align   = "c"
+  ) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  add_header_above(c("SLICC/SDI" = ncol(.)))
+```
+
+```{r,SLICC_barras}
+slicc_df <- data.frame(
+  sdi  = factor(paste0("SDI = ", 0:6), levels = paste0("SDI = ", 0:6)),
+  n    = c(129, 71, 27, 14, 7, 2, 2),
+  pct  = c(51.2, 28.2, 10.7, 5.6, 2.8, 0.8, 0.8)
+)
+
+cols_slicc <- c("#1A5276","#2374A5","#2E86AB","#57B8E8","#85C1E9","#A8DADC","#D6EAF8")
+
+ggplot(slicc_df, aes(x = sdi, y = n, fill = sdi)) +
+  geom_col(width = 0.6, show.legend = FALSE) +
+  geom_text(aes(label = paste0(n, "\n(", pct, "%)")),
+            vjust = -0.3, size = 3.8, fontface = "bold", color = "#1A1A2E") +
+  scale_fill_manual(values = cols_slicc) +
+  scale_y_continuous(limits = c(0, 155), expand = c(0, 0)) +
+  labs(
+    title    = "Distribución del daño orgánico acumulado (SLICC/SDI)",
+    subtitle = "n = 252 pacientes LES | Gladman et al., Arthritis Rheum. 1996",
+    x        = "Puntuación SLICC/SDI",
+    y        = "N pacientes"
+  ) +
+  theme_classic(base_family = "Arial", base_size = 13) +
+  theme(
+    plot.title    = element_text(face = "bold", size = 14, hjust = 0.5),
+    plot.subtitle = element_text(size = 11, hjust = 0.5, color = "grey40"),
+    plot.margin   = margin(20, 20, 20, 20)
+  )
+```
+
+---
+
+# Cálculo del SLE-DAS
+
+El **SLE Disease Activity Score (SLE-DAS)** es un índice continuo de
+actividad que integra manifestaciones clínicas y analíticas [@Jesus2019]. Se calcula según la fórmula publicada por Jorge et al. y se categorizó en remisión (SLE-DAS ≤ 2.08), actividad leve (2.08 < SLE-DAS ≤ 7.64) y actividad moderada‑grave (SLE-DAS > 7.64), de acuerdo con las definiciones establecidas [@Jesus2021].
+
+
+$$
+\begin{aligned}
+\text{SLE-DAS} =\ & 0.366 
++ 3.132 \times \text{Arthritis} 
++ 0.454 \times \text{SJC} 
++ 4.408 \times \text{MucocutVasculitis} \\
+& + 3.138 \times \text{LocalRash} 
++ 3.887 \times \text{GeneralRash}
++ 0.973 \times \text{Alopecia} 
++ 2.769 \times \text{MucosalUlcers} \\
+& + 0.754 \times \text{HypoC} 
++ 0.956 \times \text{IncreasedAnti-dsDNA}
+- 17.584 \times \text{PProt} 
++ 3.811 \times \text{PProt} \times \ln(\text{Prot}) \\
+& + 26.105 \times \text{Thromb} 
+- 5.577 \times \text{Thromb} \times \ln(\text{PlatCount}) \\
+& + 6.118 \times \text{Leukopenia} 
+- 5.058 \times \text{Leukopenia} \times \ln(\text{LeukCount}) \\
+& + 18 \times \text{Neuropsych} 
++ 18 \times \text{SystemicVasc} 
++ 18 \times \text{CardioPulm} \\
+& + 9 \times \text{Myositis} 
++ 6 \times \text{Serositis} 
++ 9 \times \text{Hemolytic}
+\end{aligned}
+$$
+
+```{r sledas_formula}
+# El cálculo del SLE-DAS requiere tres variables auxiliares antes de aplicar
+# la fórmula principal. Su objetivo es preparar los términos logarítmicos
+# para que no generen errores matemáticos cuando el evento clínico está ausente.
+DataSet_bruto <- DataSet_bruto %>%
+  mutate(
+    # Variables auxiliares con logaritmos
+    #1. PROTEINURIA AUXILIAR
+    # La fórmula usa ln(proteinuria), pero si el paciente no tiene proteinuria
+    # clínicamente relevante (sledas6 = 0), el valor es 0 y ln(0) = -Inf (error).
+    # Solución: asignar el valor 1 cuando sledas6 = 0, ya que ln(1) = 0,
+    # lo que anula el término sin afectar al resultado final.
+    prot_aux  = ifelse(sledas6 == 0, 1, proteinuria),
+    # 2. PLAQUETAS AUXILIAR
+    # La fórmula requiere el recuento plaquetario en unidades de 10⁹/L.
+    # Las plaquetas están registradas en x10³/µL (valores típicos: 150–400),
+    # por lo que se dividen entre 1000 para obtener la escala correcta.
+    # El término solo se activa cuando hay trombocitopenia (sledas14 = 1).
+    plaq_aux  = sledas14 * (plaq / 1000),
+    # 3. LEUCOCITOS AUXILIAR
+    # Igual que las plaquetas: se convierten a 10⁹/L dividiendo entre 1000.
+    # El término solo se activa cuando hay leucopenia (sledas15 = 1).
+    leuc_aux  = sledas15 * (leucos / 1000), # leucos = leucocitos (x10^9/L)
+    
+    sledas = 0.366 +
+      (18    * sledas1)  +
+      (18    * sledas2)  +
+      (4.408 * sledas3)  +
+      (18    * sledas4)  +
+      (6     * sledas5)  +
+      (-17.584 * sledas6) + (3.811 * sledas6 * log(prot_aux)) +
+      (3.132 * sledas7)  +
+      (0.454 * sjc)      +
+      (9     * sledas8)  +
+      (3.138 * sledas9)  +
+      (3.887 * sledas10) +
+      (0.973 * sledas11) +
+      (2.769 * sledas12) +
+      (9     * sledas13) +
+      (26.105 * sledas14) +
+      ifelse(sledas14 == 1 & !is.na(plaq),
+             -5.577 * log(plaq / 1000), 0) +
+      (6.118 * sledas15) +
+      ifelse(sledas15 == 1 & !is.na(leucos),
+             -5.058 * log(leucos / 1000), 0) +
+      (0.754 * sledas16) +
+      (0.956 * sledas17)
+  )
+```
+
+```{r sledas}
+DataSet_bruto <- DataSet_bruto %>%
+  mutate(
+    sledas_cat = case_when(
+      sledas <= 2.08 ~ "Remisión (SLE-DAS ≤ 2.08)",
+      sledas > 2.08 & sledas <= 7.64 ~ "Actividad leve (2.08 < SLE-DAS ≤ 7.64)",
+      sledas > 7.64 ~ "Actividad moderada-grave (SLE-DAS > 7.64)",
+      TRUE ~ NA_character_
+    ),
+    sledas_cat = factor(
+      sledas_cat,
+      levels = c(
+        "Remisión (SLE-DAS ≤ 2.08)",
+        "Actividad leve (2.08 < SLE-DAS ≤ 7.64)",
+        "Actividad moderada-grave (SLE-DAS > 7.64)"
+      )
+    )
+  )
+DataSet_bruto %>%
+  filter(les == "LES") %>%
+  count(sledas_cat, .drop = FALSE) %>%
+  mutate(
+    `N (%)` = paste0(n, " (", round(100 * n / sum(n), 1), "%)")
+  ) %>%
+  select(`Categoría SLE-DAS` = sledas_cat, `N (%)`) %>%
+  kable(
+    caption = "Distribución de pacientes LES según categoría de actividad por SLE-DAS",
+    align = c("l", "r")
+  ) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+
+---
+
+# Cálculo del LLDAS
+
+El **Lupus Low Disease Activity State (LLDAS)** es un estado compuesto
+que un paciente cumple cuando satisface simultáneamente los cinco criterios
+siguientes [@Franklyn2016]:
+
+1. SLEDAI-2K ≤ 4 (sin afectación de SNC, renal, cardiopulmonar, vasculitis ni fiebre)
+2. Ningún dato nuevo de actividad de LES respecto a la visita previa
+3. EVA médico ≤ 1 (escala 0–3)
+4. Prednisona ≤ 7.5 mg/día
+5. Inmunosupresor a dosis estable y/o tolerada
+
+```{r lldas}
+# llitem2 = SLEDAI-2k ≤ 4 sin manifestaciones graves
+# llitem3 = sin nuevos datos de actividad
+# evamed  = EVA médico (0–3); LLDAS requiere ≤ 1
+# llitem5 = PDN ≤ 7.5 mg/día
+
+DataSet_bruto <- DataSet_bruto %>%
+  mutate(
+    lldas = as.integer(
+      llitem2 == 1 &           # SLEDAI-2k ≤ 4 sin manifestaciones graves
+      llitem3 == 1 &           # sin nuevos datos vs. visita previa
+      evamed  <= 1 &           # EVA médico ≤ 1
+      llitem5 == 1             # PDN ≤ 7.5 mg/día
+    )
+  )
+
+# 0 = no cumple LLDAS; 1 = cumple LLDAS
+DataSet_bruto %>%
+  filter(les == "LES") %>%
+  count(lldas) %>%
+  mutate(
+    Estado       = ifelse(lldas == 1, "Cumple LLDAS", "No cumple LLDAS"),
+    `N (%)`      = paste0(n, " (", round(n / sum(n) * 100, 1), "%)")
+  ) %>%
+  select(Estado, `N (%)`) %>%
+  kable(caption = "Tabla 4. Estado LLDAS en pacientes LES") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+
+---
+
+# Cálculo del DORIS
+
+Los criterios **DORIS** (Definition Of Remission In SLE) definen distintos
+niveles de remisión clínica [@van_Vollenhoven2021]. Requiere el 
+cumplimiento simultáneo de los siguientes criterios: 
+
+1. SLEDAI-2K clínico = 0 (excluyendo los ítems serológicos anti-dsDNA y complemento); 
+2. Evaluación global del médico (Evaluator's Global Assessment,escala 0–3) <0,5; 
+3. Prednisona ≤5 mg/día; y 
+4. Ttratamiento de mantenimiento estable con antipalúdicos, inmunosupresores y/o biológicos.
+
+```{r doris}
+
+DataSet_bruto <- DataSet_bruto %>%
+  mutate(
+    # Prednisona: si está ausente (no toma), se considera 0 mg/día
+    predmgdia_imp = ifelse(is.na(predmgdia), 0, predmgdia),
+
+    # Criterios DORIS
+    sledai_clin = sledai - item20 - item21,
+
+    doris_sledai_clin0 = as.integer(sledai_clin == 0),
+    doris_phga_ok      = as.integer(evamed < 0.5),           # PhGA < 0,5 cm
+    doris_pdn_ok       = as.integer(predmgdia_imp <= 5),     # PDN ≤ 5 mg/día o no toma
+    doris_tto_estable  = as.integer(ditem3 == 1),
+
+    doris = as.integer(
+      doris_sledai_clin0 == 1 &
+      doris_phga_ok      == 1 &
+      doris_pdn_ok       == 1 &
+      doris_tto_estable  == 1
+    )
+  )
+
+# Tabla resumen N (%) de pacientes en remisión DORIS
+DataSet_bruto %>%
+  filter(les == "LES") %>%
+  count(doris) %>%
+  mutate(
+    Estado = ifelse(doris == 1, "Cumple DORIS (remisión)", "No cumple DORIS"),
+    `%`    = round(n / sum(n) * 100, 1)
+  ) %>%
+  select(Estado, n, `%`) %>%
+  kable(
+    caption = "Tabla 5. Cumplimiento de los criterios DORIS en pacientes con LES",
+    col.names = c("Estado DORIS", "N", "%"),
+    align = c("l", "r", "r")
+  ) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+
+```{r, LLDAS_DORIS}
+estados_df <- data.frame(
+  indice  = rep(c("LLDAS", "DORIS"), each = 2),
+  estado  = rep(c("Cumple", "No cumple"), 2),
+  n       = c(214, 38, 132, 120),
+  pct     = c(84.9, 15.1, 52.4, 47.6)
+)
+estados_df$indice <- factor(estados_df$indice, levels = c("LLDAS", "DORIS"))
+estados_df$estado <- factor(estados_df$estado, levels = c("No cumple", "Cumple"))
+
+ggplot(estados_df, aes(x = indice, y = pct, fill = estado)) +
+  geom_col(width = 0.5) +
+  geom_text(aes(label = paste0(n, "\n(", pct, "%)")),
+            position = position_stack(vjust = 0.5),
+            size = 3.5, fontface = "bold", color = "white") +
+  scale_fill_manual(values = c("Cumple" = "#2E86AB", "No cumple" = "#A8DADC"), name = "") +
+  scale_y_continuous(limits = c(0, 105), expand = c(0, 0),
+                     labels = function(x) paste0(x, "%")) +
+  labs(title    = "Estado de baja actividad (LLDAS) y remisión (DORIS)",
+       subtitle = "n = 252 pacientes LES",
+       x = NULL, y = "Porcentaje de pacientes (%)") +
+  theme_classic(base_family = "Arial", base_size = 13) +
+  theme(plot.title      = element_text(face = "bold", size = 14, hjust = 0.5),
+        plot.subtitle   = element_text(size = 11, hjust = 0.5, color = "grey40"),
+        legend.position = "bottom",
+        axis.text.x     = element_text(size = 13, face = "bold"),
+        plot.margin     = margin(20, 20, 20, 20))
+```
+
+---
+
+# Guardado de objetos
+
+Los datos con los índices calculados junto con las variables demográficas, séricas y de expresión se guardan para su uso en análisis posteriores (análisis descriptivo, firma interferónica, integración multi-ómica).
+
+```{r guardar}
+
+# Variables séricas y analíticas
+vars_sericas <- c(
+  "pcrmgl", "creatinina", "colesterol", "trigli", "hdl", "ldl",
+  "apoa1", "apob", "apoba", "lipoprotein a",
+  "glucosa", "insulinauuml", "pepcngml",
+  "glucosanmoll", "insulinapmoll", "pepcnmoll",
+  "homair", "homas", "homab",
+  "c3", "c4",
+  "got", "gpt", "ggt", "prot tot"
+)
+
+# Genes ISG
+genes_isg <- c(
+  "BDCA1", "BST2", "CEACAM1", "CMPK2", "CXCL10", "CXCL9", "DDX60",
+  "DNAJA1", "EIFAK2", "EPSTI1", "GBP1", "GBP4", "GBP5", "HERC5", "HERC6",
+  "IFI16", "IFI27", "IFI35", "IFI44", "IFI44L", "IFI6", "IFIH1", "IFIT1",
+  "IFIT2", "IFIT3", "IFIT5", "IFITM1", "IFITM3", "IL1RN", "IL6", "IRF1",
+  "IRF7", "ISG15", "ISG20", "LAMP3", "LGALS3BP", "LY6E", "MX1", "MX2",
+  "MYD88", "NC0A7", "NT5C3B", "OAS1", "OAS2", "OAS3", "OASL", "PARP12",
+  "PARP9", "PHF11", "PLSCR1", "PRKR", "PSMB9", "RSAD2", "RTP4", "SAMD9L",
+  "SERPING1", "SIGLEC1", "SOCS1", "SP100", "SP140", "SPATS2L", "STAT1",
+  "TAP1", "TNFAIP6", "TNFSF10", "TRIM38", "TYK2", "UB2L6", "UNC93B1",
+  "USP18", "XAF1", "ZBP1"
+)
+
+# Housekeeping
+genes_hk <- c("alas1", "g6pd", "hprt1", "polr2a", "tbp")
+
+# Sondas de control NanoString
+sondas_ctrl <- c(
+  "NEG_A", "NEG_B", "NEG_C", "NEG_D", "NEG_E", "NEG_F",
+  "POS_A", "POS_B", "POS_C", "POS_D", "POS_E", "POS_F"
+)
+
+# Crear DataSet_scores
+DataSet_scores <- DataSet_bruto %>%
+  rename(
+    IFNapgml = `IFNαpg/ml`,
+    IFNgpgml = `IFNγpg/ml`,
+    IL2pgml  = `IL2pg/ml`,
+    IL6pgml  = `IL6pg/ml`,
+    IL8pgml  = `IL8pg/ml`,
+    baffpgml = `baffpg/ml`
+  ) %>%
+  select(
+    id2, varon1, les,
+    edad, duracion, edadiag,
+    sledai, slicc, sledas, lldas, doris,
+    any_of(vars_sericas),
+    IFNapgml, IFNgpgml, IL2pgml, IL6pgml, IL8pgml, baffpgml,
+    all_of(genes_isg),
+    all_of(genes_hk),
+    all_of(sondas_ctrl)
+  )
+
+cat("Dimensiones de DataSet_scores:", nrow(DataSet_scores), "filas x", ncol(DataSet_scores), "columnas\n")
+
+# Guardar
+saveRDS(DataSet_scores, "DataSet_scores.rds")
+cat("✔ Guardado: DataSet_scores.rds\n")
+```
+
+---
+
+# Análisis Descriptivo
+
+Este apartado presenta el análisis descriptivo de las variables clínicas, 
+los índices de actividad y daño, y las variables séricas y analíticas 
+recogidas en la visita de estudio. Los resultados se presentan de forma 
+separada para pacientes con LES y controles sanos. Las variables continuas 
+se expresan como media ± desviación estándar (DE) cuando siguen distribución 
+normal (test de Shapiro-Wilk, p ≥ 0,05), o como mediana [rango intercuartílico, 
+IQR] en caso contrario. Las variables categóricas se expresan como N (%).
+
+```{r descriptivo_setup}
+les  <- DataSet_scores %>% filter(les == "LES")
+ctrl <- DataSet_scores %>% filter(les == "Control")
+
+desc_continua <- function(df, var, label) {
+  x <- df[[var]]; x <- x[!is.na(x)]; n_valid <- length(x)
+  if (n_valid == 0)
+    return(tibble(Variable = label, `N válido` = 0,
+                  `Media±DE / Mediana[IQR]` = "—"))
+  if (n_valid == 1)
+    return(tibble(Variable = label, `N válido` = 1,
+                  `Media±DE / Mediana[IQR]` = as.character(round(x, 2))))
+  sw_p <- if (n_valid >= 3 & n_valid <= 5000)
+    tryCatch(shapiro.test(x)$p.value, error = function(e) NA) else NA
+  normal <- !is.na(sw_p) && sw_p >= 0.05
+  res <- if (normal) paste0(round(mean(x), 2), " ± ", round(sd(x), 2)) else
+    paste0(round(median(x), 2),
+           " [", round(quantile(x, 0.25), 2),
+           "–",  round(quantile(x, 0.75), 2), "]")
+  tibble(Variable = label, `N válido` = n_valid,
+         `Media±DE / Mediana[IQR]` = res)
+}
+
+desc_categorica <- function(df, var, label) {
+  x <- df[[var]]; tab <- table(x, useNA = "no"); total <- sum(tab)
+  if (total == 0)
+    return(tibble(Variable = label, `N válido` = 0,
+                  `Media±DE / Mediana[IQR]` = "—"))
+  tibble(
+    Variable = paste0(label, ": ", names(tab)),
+    `N válido` = as.integer(tab),
+    `Media±DE / Mediana[IQR]` = paste0(round(as.integer(tab)/total*100, 1), "%")
+  )
+}
+
+desc_cat_tabla <- function(df, var, label) {
+  x <- df[[var]]; tab <- table(x, useNA = "no"); total <- sum(tab)
+  if (total == 0)
+    return(tibble(Variable = label, `N válido` = 0, `Valor` = "—"))
+  bind_rows(
+    tibble(Variable = label, `N válido` = total, `Valor` = "—"),
+    tibble(Variable = paste0("  · ", names(tab)),
+           `N válido` = as.integer(tab),
+           `Valor` = paste0(round(as.integer(tab)/total*100, 1), "%"))
+  )
+}
+
+fila_continua <- function(df, var, label) {
+  x <- df[[var]]; x <- x[!is.na(x)]; n <- length(x)
+  if (n == 0) return(tibble(Variable = label, N = 0, Resultado = "—"))
+  if (n == 1) return(tibble(Variable = label, N = 1,
+                             Resultado = as.character(round(x, 2))))
+  sw_p <- tryCatch(shapiro.test(x)$p.value, error = function(e) NA)
+  normal <- !is.na(sw_p) && sw_p >= 0.05
+  res <- if (normal) paste0(round(mean(x), 2), " ± ", round(sd(x), 2)) else
+    paste0(round(median(x), 2),
+           " [", round(quantile(x, 0.25), 2),
+           "–",  round(quantile(x, 0.75), 2), "]")
+  tibble(Variable = label, N = n, Resultado = res)
+}
+
+fila_categorica <- function(df, var, label) {
+  x <- df[[var]]; tab <- table(x, useNA = "no"); total <- sum(tab)
+  if (total == 0) return(tibble(Variable = label, N = 0, Resultado = "—"))
+  bind_rows(
+    tibble(Variable = label, N = total, Resultado = "—"),
+    tibble(Variable = paste0("  · ", names(tab)),
+           N = as.integer(tab),
+           Resultado = paste0(as.integer(tab), " (",
+                              round(as.integer(tab)/total*100, 1), "%)"))
+  )
+}
+```
+
+## Variables demográficas y clínicas
+
+```{r tabla_demografica}
+vars_demo <- list(
+  list(var = "edad",     label = "Edad (años)",               tipo = "cont"),
+  list(var = "varon1",   label = "Sexo",                      tipo = "cat"),
+  list(var = "duracion", label = "Duración enfermedad (años)", tipo = "cont"),
+  list(var = "edadiag",  label = "Edad al diagnóstico (años)", tipo = "cont")
+)
+
+tabla_demo_les  <- bind_rows(lapply(vars_demo, function(v)
+  if (v$tipo == "cont") desc_continua(les,  v$var, v$label)
+  else                  desc_categorica(les, v$var, v$label)))
+
+tabla_demo_ctrl <- bind_rows(lapply(vars_demo, function(v)
+  if (v$tipo == "cont") desc_continua(ctrl,  v$var, v$label)
+  else                  desc_categorica(ctrl, v$var, v$label)))
+
+left_join(tabla_demo_les, tabla_demo_ctrl,
+          by = "Variable", suffix = c(" LES", " Control")) %>%
+  kable(caption = "Tabla 1. Características demográficas (LES vs. Controles)",
+        align = c("l", "r", "r", "r", "r")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+
+## Índices de actividad y daño (pacientes LES)
+
+```{r tabla_scores}
+
+les <- DataSet_scores %>% filter(les == "LES") %>%
+  mutate(
+    sledai_cat = factor(case_when(
+      sledai == 0                  ~ "Remisión (0)",
+      sledai >= 1 & sledai <= 5    ~ "Leve (1–5)",
+      sledai >= 6 & sledai <= 10   ~ "Moderada (6–10)",
+      sledai >= 11 & sledai <= 19  ~ "Alta (11–19)",
+      sledai >= 20                 ~ "Muy alta (≥20)"
+    ), levels = c("Remisión (0)", "Leve (1–5)", "Moderada (6–10)",
+                  "Alta (11–19)", "Muy alta (≥20)")),
+
+    sledas_cat = factor(case_when(
+      sledas <= 2.08                  ~ "Remisión (≤2.08)",
+      sledas > 2.08 & sledas <= 7.64  ~ "Leve (>2.08–≤7.64)",
+      sledas > 7.64                   ~ "Moderada-grave (>7.64)"
+    ), levels = c("Remisión (≤2.08)", "Leve (>2.08–≤7.64)",
+                  "Moderada-grave (>7.64)"))
+  )
+
+# Funciones con columna unificada "Resultado"
+fila_continua <- function(df, var, label) {
+  x <- df[[var]]; x <- x[!is.na(x)]; n <- length(x)
+  if (n == 0) return(tibble(Variable = label, N = 0, Resultado = "Sin datos"))
+  if (n == 1) return(tibble(Variable = label, N = 1,
+                             Resultado = as.character(round(x, 2))))
+  sw_p <- tryCatch(shapiro.test(x)$p.value, error = function(e) NA)
+  normal <- !is.na(sw_p) && sw_p >= 0.05
+  res <- if (normal) paste0(round(mean(x), 2), " ± ", round(sd(x), 2)) else
+    paste0(round(median(x), 2),
+           " [", round(quantile(x, 0.25), 2),
+           "–",  round(quantile(x, 0.75), 2), "]")
+  tibble(Variable = label, N = n, Resultado = res)
+}
+
+fila_categorica <- function(df, var, label) {
+  x <- df[[var]]; tab <- table(x, useNA = "no"); total <- sum(tab)
+  if (total == 0) return(tibble(Variable = label, N = 0, Resultado = "Sin datos"))
+  bind_rows(
+    tibble(Variable = label,                   N = total, Resultado = "—"),
+    tibble(Variable = paste0("  · ", names(tab)),
+           N = as.integer(tab),
+           Resultado = paste0(as.integer(tab), " (", 
+                              round(as.integer(tab)/total*100, 1), "%)"))
+  )
+}
+
+# Construir Tabla 2
+tabla2 <- bind_rows(
+  fila_continua(les,   "sledai",     "SLEDAI-2K"),
+  fila_categorica(les, "sledai_cat", "  Categoría SLEDAI-2K"),
+  fila_continua(les,   "slicc",      "SLICC/SDI"),
+  fila_continua(les,   "sledas",     "SLE-DAS"),
+  fila_categorica(les, "sledas_cat", "  Categoría SLE-DAS"),
+  fila_categorica(les, "lldas",      "LLDAS"),
+  fila_categorica(les, "doris",      "DORIS")
+)
+
+kable(tabla2,
+      col.names = c("Variable", "N válido", "Resultado"),
+      caption   = "Tabla 2. Índices de actividad y daño en pacientes LES",
+      align     = c("l", "r", "r")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"),
+                full_width = FALSE) %>%
+  row_spec(which(!grepl("^  ·", tabla2$Variable)), bold = TRUE)
+```
+
+## Variables séricas y analíticas
+
+```{r tabla_sericas}
+
+vars_sericas_list <- list(
+  list(var = "pcrmgl",        label = "PCR (mg/L)"),
+  list(var = "creatinina",    label = "Creatinina"),
+  list(var = "colesterol",    label = "Colesterol total"),
+  list(var = "trigli",        label = "Triglicéridos"),
+  list(var = "hdl",           label = "HDL"),
+  list(var = "ldl",           label = "LDL"),
+  list(var = "apoa1",         label = "Apolipoproteína A1"),
+  list(var = "apob",          label = "Apolipoproteína B"),
+  list(var = "apoba",         label = "Apolipoproteína(a)"),
+  list(var = "lipoprotein a", label = "Lipoproteína(a)"),
+  list(var = "glucosa",       label = "Glucosa"),
+  list(var = "insulinauuml",  label = "Insulina (µU/mL)"),
+  list(var = "pepcngml",      label = "Péptido C (ng/mL)"),
+  list(var = "homair",        label = "HOMA-IR"),
+  list(var = "homas",         label = "HOMA-S"),
+  list(var = "homab",         label = "HOMA-B"),
+  list(var = "c3",            label = "Complemento C3"),
+  list(var = "c4",            label = "Complemento C4"),
+  list(var = "got",           label = "GOT/AST"),
+  list(var = "gpt",           label = "GPT/ALT"),
+  list(var = "ggt",           label = "GGT"),
+  list(var = "prot tot",      label = "Proteínas totales"),
+  list(var = "IFNapgml",      label = "IFN-α (pg/mL)"),
+  list(var = "IFNgpgml",      label = "IFN-γ (pg/mL)"),
+  list(var = "IL2pgml",       label = "IL-2 (pg/mL)"),
+  list(var = "IL6pgml",       label = "IL-6 (pg/mL)"),
+  list(var = "IL8pgml",       label = "IL-8 (pg/mL)"),
+  list(var = "baffpgml",      label = "BAFF (pg/mL)")
+)
+
+tabla3 <- bind_rows(lapply(vars_sericas_list, function(v)
+  fila_continua(les, v$var, v$label)))
+
+kable(tabla3,
+      col.names = c("Variable", "N válido", "Resultado"),
+      caption   = "Tabla 3. Variables séricas y analíticas en pacientes LES",
+      align     = c("l", "r", "r")) |>
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+
+---
+
+# Referencias Índices clínicos
+
+- **SLEDAI-2K**: Gladman DD et al. *J Rheumatol.* 2002;29(2):288–91.  
+- **SLICC/SDI**: Gladman DD et al. *Arthritis Rheum.* 1996;39(3):363–9.  
+- **SLE-DAS**: Jorge AM et al. *Ann Rheum Dis.* 2019;78(3):365–71. 
+- **SLE-DAS remisión y categorías**: Jesus D et al. *Ann Rheum Dis.* 2021;80(12):1568–74. 
+- **LLDAS**: Franklyn K et al. *Ann Rheum Dis.* 2016;75(9):1615–21.  
+- **DORIS**: van Vollenhoven RF et al. *Ann Rheum Dis.* 2021;80(6):736–45.
+
+---
+
+```{r}
+library(ggplot2)
+
+# Definir centros y alturas
+# Cajas azules: centro_A=9.9, centro_B=7.4, centro_C=4.9, centro_F=2.1
+# Cajas rojas: mismo centro que su azul correspondiente
+
+# Alturas de cajas rojas (proporcional al contenido)
+h_ex1 <- 1.8   # 5 líneas
+h_ex2 <- 1.2   # 3 líneas
+h_ex3 <- 0.9   # 2 líneas
+
+png("Fig1_Diagrama_Flujo.png", width = 4000, height = 3600, res = 300)
+
+ggplot() +
+
+  # ── CAJAS AZULES ──────────────────────────────────────────────────────────
+
+  # A: centro=9.9
+  annotate("rect", xmin=1, xmax=5.2, ymin=9.3, ymax=10.5,
+           fill="#EAF4FB", color="#2E86AB", linewidth=1.3) +
+  annotate("text", x=3.1, y=9.9,
+           label="Pacientes preseleccionados con\ndiagnóstico clínico de LES\nn = 400",
+           size=5.0, family="sans", hjust=0.5) +
+
+  # B: centro=7.4
+  annotate("rect", xmin=1, xmax=5.2, ymin=6.8, ymax=8.0,
+           fill="#EAF4FB", color="#2E86AB", linewidth=1.3) +
+  annotate("text", x=3.1, y=7.4,
+           label="Pacientes elegibles tras criterios\nde inclusión / exclusión\nn = 313",
+           size=5.0, family="sans", hjust=0.5) +
+
+  # C: centro=4.9
+  annotate("rect", xmin=1, xmax=5.2, ymin=4.3, ymax=5.5,
+           fill="#EAF4FB", color="#2E86AB", linewidth=1.3) +
+  annotate("text", x=3.1, y=4.9,
+           label="Muestra analítica final\n(datos clínicos + biomarcadores séricos)\nn = 252 LES",
+           size=5.0, family="sans", hjust=0.5) +
+
+  # F: centro=2.1
+  annotate("rect", xmin=1, xmax=5.2, ymin=1.5, ymax=2.7,
+           fill="#EAF4FB", color="#2E86AB", linewidth=1.3) +
+  annotate("text", x=3.1, y=2.1,
+           label="Cohorte transcriptómica final\n(IFN-score · 72 ISGs · NanoString nCounter)\nn = 251 LES  +  24 controles",
+           size=5.0, family="sans", hjust=0.5) +
+
+  # Controles sanos: centro=2.1 (mismo nivel que F)
+  annotate("rect", xmin=6.5, xmax=10.5, ymin=1.5, ymax=2.7,
+           fill="#EAF4FB", color="#2E86AB", linewidth=1.3) +
+  annotate("text", x=8.5, y=2.1,
+           label="Controles sanos\n(frecuencia-pareados por edad y sexo)\nn = 24",
+           size=5.0, family="sans", hjust=0.5) +
+
+  # ── CAJAS ROJAS (centradas exactamente igual que su caja azul) ────────────
+
+  # EX1: centro=9.9, altura=1.8 → ymin=9.0, ymax=10.8
+  annotate("rect", xmin=6.5, xmax=11.2, ymin=9.0, ymax=10.8,
+           fill="#FADBD8", color="#E74C3C", linewidth=1.1) +
+  annotate("text", x=8.85, y=9.9,
+           label="Excluidos  (n = 87)\n· No cumplen ≥4 criterios ACR: n = 45 (11,3%)\n· Consentimiento incompleto: n = 20 (5,0%)\n· Tratamiento con anifrolumab: n = 12 (3,0%)\n· Muestras séricas inadecuadas: n = 10 (2,5%)",
+           size=4.5, family="sans", hjust=0.5, color="#7B241C") +
+
+  # EX2: centro=7.4, altura=1.2 → ymin=6.8, ymax=8.0
+  annotate("rect", xmin=6.5, xmax=11.2, ymin=6.8, ymax=8.0,
+           fill="#FADBD8", color="#E74C3C", linewidth=1.1) +
+  annotate("text", x=8.85, y=7.4,
+           label="Excluidos del análisis transcriptómico  (n = 61)\n· Sin datos NanoString completos\n  o fallo en control de calidad (QC)",
+           size=4.5, family="sans", hjust=0.5, color="#7B241C") +
+
+  # EX3: centro=4.9, altura=0.9 → ymin=4.45, ymax=5.35
+  annotate("rect", xmin=6.5, xmax=11.2, ymin=4.45, ymax=5.35,
+           fill="#FADBD8", color="#E74C3C", linewidth=1.1) +
+  annotate("text", x=8.85, y=4.9,
+           label="Excluido: fallo en normalización NanoString  (n = 1)",
+           size=4.5, family="sans", hjust=0.5, color="#7B241C") +
+
+  # ── FLECHAS AZULES VERTICALES ─────────────────────────────────────────────
+  annotate("segment", x=3.1, xend=3.1, y=9.3, yend=8.0,
+           color="#2E86AB", linewidth=1.5,
+           arrow=arrow(length=unit(0.3,"cm"), type="closed")) +
+  annotate("segment", x=3.1, xend=3.1, y=6.8, yend=5.5,
+           color="#2E86AB", linewidth=1.5,
+           arrow=arrow(length=unit(0.3,"cm"), type="closed")) +
+  annotate("segment", x=3.1, xend=3.1, y=4.3, yend=2.7,
+           color="#2E86AB", linewidth=1.5,
+           arrow=arrow(length=unit(0.3,"cm"), type="closed")) +
+
+  # ── FLECHAS ROJAS HORIZONTALES PURAS ─────────────────────────────────────
+  # Sale del borde derecho de la caja azul (x=5.2)
+  # al mismo centro vertical → entra por el borde izquierdo de la roja (x=6.5)
+
+  # A → EX1: y=9.9
+  annotate("segment", x=5.2, xend=6.5, y=9.9, yend=9.9,
+           color="#E74C3C", linewidth=1.2, linetype="dashed",
+           arrow=arrow(length=unit(0.25,"cm"), type="open")) +
+
+  # B → EX2: y=7.4
+  annotate("segment", x=5.2, xend=6.5, y=7.4, yend=7.4,
+           color="#E74C3C", linewidth=1.2, linetype="dashed",
+           arrow=arrow(length=unit(0.25,"cm"), type="open")) +
+
+  # C → EX3: y=4.9
+  annotate("segment", x=5.2, xend=6.5, y=4.9, yend=4.9,
+           color="#E74C3C", linewidth=1.2, linetype="dashed",
+           arrow=arrow(length=unit(0.25,"cm"), type="open")) +
+
+  # ── FLECHA CONTROLES → F: y=2.1 ──────────────────────────────────────────
+  annotate("segment", x=6.5, xend=5.2, y=2.1, yend=2.1,
+           color="#888888", linewidth=1.1, linetype="dashed",
+           arrow=arrow(length=unit(0.25,"cm"), type="open")) +
+
+  # ── Estilo ────────────────────────────────────────────────────────────────
+  scale_x_continuous(limits=c(0.5, 11.8), expand=c(0,0)) +
+  scale_y_continuous(limits=c(1.0, 11.2), expand=c(0,0)) +
+  theme_void() +
+  theme(plot.background = element_rect(fill="white", color=NA),
+        plot.margin = margin(50, 50, 50, 50))
+
+dev.off()
+```
+
+
+
+
+
+
+
+

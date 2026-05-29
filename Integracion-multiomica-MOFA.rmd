@@ -1,0 +1,760 @@
+---
+title: "Integración multi-ómica de la firma de interferón y biomarcadores séricos en LES"
+subtitle: "Análisis MOFA2 (Multi-Omics Factor Analysis) — Integración no supervisada"
+author: "Fuensanta Bernal Gómez"
+date: "`r format(Sys.Date(), '%d de %B de %Y')`"
+output:
+  html_document:
+    self_contained: true
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    toc_depth: 3
+    number_sections: true
+    css: estilos.css
+    theme: flatly
+    highlight: tango
+    df_print: paged
+    code_folding: show
+    fig_width: 8
+    fig_height: 5
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.path = "figuras/Integración multiómica MOFA2/",
+  dev      = "png",
+  dpi      = 300,
+  fig.width  = 8,
+  fig.height = 5,
+  fig.align  = "center",
+  bg    = "white",
+  cache = FALSE
+)
+```
+
+```{r rutas}
+ruta_fig <- knitr::opts_chunk$get("fig.path")
+dir.create(ruta_fig, showWarnings = FALSE, recursive = TRUE)
+```
+
+# Introducción
+
+En este documento se presenta un análisis de **integración multi-ómica no supervisada** en pacientes con lupus eritematoso sistémico (LES) mediante el método **MOFA2** (*Multi-Omics Factor Analysis v2*) [@Argelaguet2020]. MOFA2 es un marco bayesiano de factorización matricial conjunta que descompone la variación de múltiples capas ómicas en un conjunto reducido de **factores latentes** compartidos o específicos de cada bloque, sin necesidad de definir una variable respuesta *a priori*.
+
+A diferencia de DIABLO, que opera de forma supervisada, MOFA2 permite descubrir la **estructura latente intrínseca** de los datos, identificando fuentes de variación coordinadas entre bloques que permanecerían ocultas en análisis unicapa. Los factores obtenidos pueden posteriormente correlacionarse con las variables clínicas de actividad y remisión (SLEDAI-2K, SLE-DAS, LLDAS, DORIS), proporcionando una interpretación biológica y clínica directa.
+
+Se integran dos bloques ómicos medidos en la misma muestra de pacientes:
+
+- **Bloque transcriptómico:** expresión de 72 genes estimulados por interferón (ISGs) cuantificados mediante NanoString nCounter, normalizados y transformados a escala log2.
+- **Bloque proteómico sérico:** panel de citocinas (IFN-α, IFN-γ, IL-2, IL-6, IL-8, BAFF), factores del complemento (C3, C4), marcadores de inflamación (PCR), función renal (creatinina), perfil lipídico (colesterol, triglicéridos, HDL, LDL, Apo A-I, Apo B, cociente Apo B/A-I, lipoproteína(a)) y parámetros hepático-nutricionales (GOT, GPT, GGT, proteínas totales).
+
+---
+
+# Carga de paquetes
+
+```{r paquetes}
+if (!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+
+if (!requireNamespace("MOFA2", quietly = TRUE))
+  BiocManager::install("MOFA2")
+
+if (!requireNamespace("basilisk", quietly = TRUE))
+  BiocManager::install("basilisk")
+
+paquetes_cran <- c(
+  "dplyr", "tidyr", "ggplot2", "knitr", "kableExtra",
+  "tibble", "forcats", "scales", "purrr", "broom", "ggpubr",
+  "RColorBrewer", "reshape2", "VIM", "pheatmap", "corrplot"
+)
+
+for (pkg in paquetes_cran) {
+  if (!requireNamespace(pkg, quietly = TRUE)) install.packages(pkg)
+  library(pkg, character.only = TRUE)
+}
+
+library(MOFA2)
+
+select <- dplyr::select
+filter <- dplyr::filter
+```
+
+---
+
+# Paleta de colores
+
+```{r paleta}
+# Paleta IFN-high / IFN-low
+col_ifn_high <- "#d73027"   # rojo — IFN-high
+col_ifn_low  <- "#4575b4"   # azul — IFN-low
+
+col_ifn <- c("IFN-high" = col_ifn_high, "IFN-low" = col_ifn_low)
+
+# Paletas para variables clínicas continuas
+pal_sledai <- "YlOrRd"
+pal_factor <- "RdBu"
+```
+
+---
+
+# Bloque 1. Preparación de datos
+
+## Importación del dataset
+
+```{r importar_datos}
+df <- readRDS("DataSet_CorrelacionBivariada.rds")
+df <- as.data.frame(df)
+
+cat("Dimensiones:", nrow(df), "filas x", ncol(df), "columnas\n")
+head(names(df), 10)
+```
+
+## Selección de la muestra analítica
+
+Se excluyeron del análisis MOFA2 los controles sanos incluidos en el dataset 
+original (n = 24), que carecen de clasificación IFN-high/IFN-low por no 
+presentar actividad lúpica. El análisis se realizó exclusivamente sobre los 
+251 pacientes con LES confirmado. La variable `ifn_grupo` se emplea únicamente 
+como criterio de filtrado previo al modelo, sin intervenir en su ajuste.
+
+```{r filtrar_pacientes_les}
+# Excluir controles sanos (sin clasificación IFN) — solo pacientes LES entran en MOFA2
+df <- df %>%
+  filter(!is.na(ifn_grupo)) %>%
+  mutate(
+    ifn_grupo = factor(
+      case_when(
+        ifn_grupo %in% c("IFN-high", "high", "1", 1) ~ "IFN-high",
+        ifn_grupo %in% c("IFN-low",  "low",  "0", 0) ~ "IFN-low",
+        TRUE ~ NA_character_
+      ),
+      levels = c("IFN-high", "IFN-low")
+    )
+  ) %>%
+  filter(!is.na(ifn_grupo))
+
+cat("Pacientes LES incluidos en MOFA2:\n")
+cat("→ Total:", nrow(df), "\n")
+cat("→ IFN-high:", sum(df$ifn_grupo == "IFN-high"), "\n")
+cat("→ IFN-low: ", sum(df$ifn_grupo == "IFN-low"),  "\n")
+```
+
+## Definición de los bloques ómicos
+
+### Bloque transcriptómico (ISGs)
+
+```{r definir_isgs}
+isg_genes <- c(
+  "BDCA1","BST2","CEACAM1","CMPK2","CXCL10","CXCL9","DDX60","DNAJA1",
+  "EIFAK2","EPSTI1","GBP1","GBP4","GBP5","HERC5","HERC6","IFI16","IFI27",
+  "IFI35","IFI44","IFI44L","IFI6","IFIH1","IFIT1","IFIT2","IFIT3","IFIT5",
+  "IFITM1","IFITM3","IL1RN","IL6","IRF1","IRF7","ISG15","ISG20","LAMP3",
+  "LGALS3BP","LY6E","MX1","MX2","MYD88","NC0A7","NT5C3B","OAS1","OAS2",
+  "OAS3","OASL","PARP12","PARP9","PHF11","PLSCR1","PRKR","PSMB9","RSAD2",
+  "RTP4","SAMD9L","SERPING1","SIGLEC1","SOCS1","SP100","SP140","SPATS2L",
+  "STAT1","TAP1","TNFAIP6","TNFSF10","TRIM38","TYK2","UB2L6","UNC93B1",
+  "USP18","XAF1","ZBP1"
+)
+
+isg_disponibles <- intersect(isg_genes, names(df))
+cat("Genes ISG disponibles:", length(isg_disponibles), "de", length(isg_genes), "\n")
+```
+
+### Bloque proteómico sérico
+
+```{r definir_proteinas}
+proteinas_sericas <- c(
+  "IFNapgml", "IFNgpgml", "IL2pgml", "IL6pgml", "IL8pgml", "baffpgml",
+  "c3", "c4",
+  "pcrmgl", "creatinina",
+  "colesterol", "trigli", "hdl", "ldl", "apoa1", "apob", "apoba",
+  "lipoprotein_a",
+  "got", "gpt", "ggt", "prot_tot"
+)
+
+proteinas_disponibles <- intersect(proteinas_sericas, names(df))
+cat("Proteínas séricas disponibles:", length(proteinas_disponibles), "\n")
+cat("→", paste(proteinas_disponibles, collapse = ", "), "\n")
+```
+
+## Datos faltantes e imputación en el bloque proteómico
+
+```{r missing_proteinas}
+missing_prot <- df %>%
+  select(all_of(proteinas_disponibles)) %>%
+  summarise(across(everything(), ~ round(100 * mean(is.na(.)), 1))) %>%
+  pivot_longer(everything(), names_to = "Variable", values_to = "Pct_NA") %>%
+  arrange(desc(Pct_NA))
+
+kable(missing_prot,
+      caption = "Tabla 1. Porcentaje de datos faltantes en el bloque proteómico sérico.",
+      col.names = c("Variable", "% Faltantes"),
+      align = "lc") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = FALSE, font_size = 13) %>%
+  footnote(general = "Las variables con >70% de datos faltantes se excluyen del bloque proteómico; el resto se imputan mediante kNN (k = 5).",
+           general_title = "Nota")
+```
+
+## Construcción de matrices de bloques
+
+```{r construir_bloques}
+prot_excluir <- missing_prot %>% filter(Pct_NA > 70) %>% pull(Variable)
+prot_incluir <- setdiff(proteinas_disponibles, prot_excluir)
+
+cat("Variables proteómicas excluidas (>70% NA):", length(prot_excluir), "\n")
+if (length(prot_excluir) > 0) cat(" →", paste(prot_excluir, collapse = ", "), "\n")
+cat("Variables proteómicas incluidas:", length(prot_incluir), "\n")
+
+df_mofa <- df %>% filter(!is.na(ifn_grupo))
+cat("\nN total con ifn_grupo disponible:", nrow(df_mofa), "\n")
+
+stopifnot("id2" %in% names(df_mofa))
+
+# Bloque transcriptómico (muestras en filas → transponer para MOFA2)
+bloque_isg <- df_mofa %>%
+  select(all_of(isg_disponibles)) %>%
+  as.matrix()
+rownames(bloque_isg) <- df_mofa$id2
+
+# Bloque proteómico: imputación kNN + transformación log2
+bloque_prot_raw <- df_mofa %>%
+  select(all_of(prot_incluir)) %>%
+  as.matrix()
+rownames(bloque_prot_raw) <- df_mofa$id2
+
+if (any(is.na(bloque_prot_raw))) {
+  cat("\nImputando valores faltantes en bloque proteómico (kNN, k = 5)...\n")
+  ids_originales   <- rownames(bloque_prot_raw)
+  bloque_prot_imp  <- VIM::kNN(as.data.frame(bloque_prot_raw), k = 5, imp_var = FALSE)
+  bloque_prot_imp  <- as.matrix(bloque_prot_imp)
+  rownames(bloque_prot_imp) <- ids_originales
+} else {
+  bloque_prot_imp <- bloque_prot_raw
+}
+
+bloque_prot <- log2(bloque_prot_imp + 1)
+rownames(bloque_prot) <- rownames(bloque_prot_imp)
+
+# MOFA2 requiere matrices con genes/proteínas en FILAS y muestras en COLUMNAS
+mat_isg  <- t(bloque_isg)
+mat_prot <- t(bloque_prot)
+
+cat("Bloque ISG  — dimensiones (variables × muestras):", dim(mat_isg),  "\n")
+cat("Bloque Prot — dimensiones (variables × muestras):", dim(mat_prot), "\n")
+
+# Verificar alineación de muestras
+stopifnot(identical(colnames(mat_isg), colnames(mat_prot)))
+cat("\n✓ Alineación correcta de muestras en ambos bloques.\n")
+```
+
+---
+
+# Bloque 2. Creación y configuración del modelo MOFA2
+
+## Creación del objeto MOFA
+
+```{r crear_objeto_mofa}
+data_mofa <- list(
+  "Transcriptomica_ISGs" = mat_isg,
+  "Proteomica_serica"    = mat_prot
+)
+
+MOFAobject <- create_mofa(data_mofa)
+
+cat("Objeto MOFA2 creado:\n")
+print(MOFAobject)
+```
+
+## Resumen de datos faltantes por bloque
+
+```{r overview_mofa, fig.cap="Figura 0. Resumen del objeto MOFA2: distribución de datos disponibles y faltantes por bloque ómico y muestra."}
+plot_data_overview(MOFAobject)
+```
+
+## Opciones del modelo y entrenamiento
+
+```{r opciones_mofa}
+# ── Opciones del modelo ──────────────────────────────────────────────────────
+model_opts <- get_default_model_options(MOFAobject)
+model_opts$num_factors       <- 10     # máx. factores; ARD poda los no informativos
+model_opts$spikeslab_weights <- TRUE   # sparsity en loadings
+
+# ── Opciones de datos ────────────────────────────────────────────────────────
+data_opts <- get_default_data_options(MOFAobject)
+data_opts$scale_views <- FALSE         # ya escalamos manualmente
+
+# ── Opciones de entrenamiento ────────────────────────────────────────────────
+train_opts <- get_default_training_options(MOFAobject)
+train_opts$convergence_mode <- "slow"  # "fast" | "medium" | "slow"
+train_opts$seed             <- 42
+train_opts$maxiter          <- 1000
+
+MOFAobject <- prepare_mofa(
+  object           = MOFAobject,
+  data_options     = data_opts,
+  model_options    = model_opts,
+  training_options = train_opts
+)
+
+cat("  Número máximo de factores:", model_opts$num_factors, "\n")
+cat("  Sparsity en loadings (spike-slab):", model_opts$spikeslab_weights, "\n")
+cat("  Modo de convergencia:", train_opts$convergence_mode, "\n")
+cat("  Iteraciones máximas:", train_opts$maxiter, "\n")
+cat("  Semilla aleatoria:", train_opts$seed, "\n")
+```
+
+---
+
+# Bloque 3. Entrenamiento del modelo MOFA2
+
+```{r entrenar_mofa, cache=TRUE, results='hide', message=FALSE, warning=FALSE}
+outfile <- file.path(getwd(), "MOFA2_LES_model.hdf5")
+
+# Suprimir output de Python
+con_out <- file(tempfile(), open = "wt")
+con_msg <- file(tempfile(), open = "wt")
+sink(con_out, type = "output")
+sink(con_msg, type = "message")
+
+MOFAobject_trained <- run_mofa(
+  MOFAobject,
+  outfile      = outfile,
+  use_basilisk = TRUE
+)
+
+sink(type = "output")
+sink(type = "message")
+close(con_out)
+close(con_msg)
+```
+
+```{r info_mofa}
+cat("✓ Modelo MOFA2 entrenado y guardado en:\n →", outfile, "\n")
+cat("✓ Factores activos tras ARD:", get_dimensions(MOFAobject_trained)$K, "\n")
+```
+
+## Adición de metadatos clínicos
+
+```{r metadatos}
+metadata <- df_mofa %>%
+  select(id2, sledai_cat, sledas_cat, sledai, sledas, slicc, lldas, doris) %>%
+  rename(sample = id2)
+
+samples_metadata(MOFAobject_trained) <- metadata
+
+kable(head(samples_metadata(MOFAobject_trained), 6),
+      caption = "Tabla 2. Primeras filas de los metadatos clínicos incorporados al objeto MOFA2.",
+      align = "lccccccc") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = FALSE, font_size = 13) %>%
+  footnote(general = "ifn_grupo: clasificación IFN-high/IFN-low; IFN_score_72: IFN-score de 72 ISGs; SLEDAI2K, SLEDAS: índices de actividad; SLICC_SDI: daño acumulado; LLDAS, doris: estados de remisión.",
+           general_title = "Nota")
+```
+
+---
+
+# Bloque 4. Varianza explicada
+
+## Varianza por factor y bloque
+
+```{r varianza, fig.cap="Figura 1. Proporción de varianza explicada por cada factor latente en cada bloque ómico. Los factores se ordenan de mayor a menor varianza explicada global."}
+plot_variance_explained(MOFAobject_trained, max_r2 = 15)
+
+png(paste0(ruta_fig, "Fig1_VarianzaFactor.png"), width = 2800, height = 1800, res = 300)
+plot_variance_explained(MOFAobject_trained, max_r2 = 15)
+dev.off()
+```
+
+## Varianza total por bloque
+
+```{r varianza_total, fig.cap="Figura 2. Proporción de varianza total explicada por todos los factores activos en cada bloque ómico."}
+plot_variance_explained(
+  MOFAobject_trained,
+  x = "view",
+  y = "factor",
+  plot_total = TRUE
+)
+
+png(paste0(ruta_fig, "Fig2_VarianzaTotal.png"), width = 2400, height = 1600, res = 300)
+plot_variance_explained(MOFAobject_trained, x = "view", y = "factor", plot_total = TRUE)
+dev.off()
+```
+
+## Tabla resumen de varianza
+
+```{r tabla_varianza}
+var_exp <- get_variance_explained(MOFAobject_trained)
+
+# Extraer matriz 4 factores × 2 bloques del único grupo
+r2_mat <- var_exp$r2_per_factor$group1   # matriz [4 × 2]
+
+tab_var <- as.data.frame(r2_mat) %>%
+  tibble::rownames_to_column("Factor") %>%
+  pivot_longer(-Factor, names_to = "Bloque", values_to = "R2") %>%
+  mutate(
+    R2     = round(R2, 3),
+    R2_pct = round(R2, 2)
+  ) %>%
+  arrange(Bloque, desc(R2))
+
+kable(tab_var,
+      caption = "Tabla 3. Varianza explicada (R²) por factor y bloque en el modelo MOFA2.",
+      col.names = c("Factor", "Bloque", "R²", "R² (%)"),
+      align = "llcc") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = FALSE, font_size = 13) %>%
+  footnote(general = "R² = proporción de varianza explicada por cada factor latente en cada bloque. Valores extraídos de r2_per_factor$group1 (matriz 4 factores × 2 bloques).",
+           general_title = "Nota")
+```
+```{r nfactores}
+r2_mat <- var_exp$r2_per_factor$group1
+
+factores_activos <- which(apply(r2_mat, 1, max) > 1)
+
+cat("→", paste(names(factores_activos), collapse = ", "), "\n")
+cat("Total:", length(factores_activos), "\n")
+```
+
+## Top ISGs por factor
+
+```{r top_isgs_f1, fig.cap="Panel D. Top 20 ISGs con mayor peso (loading) en el Factor 1 del modelo MOFA2. Los loadings positivos (rojo) indican asociación con IFN-high; los negativos (azul) con IFN-low.", fig.width=8, fig.height=6}
+plot_top_weights(
+  MOFAobject_trained,
+  view      = "Transcriptomica_ISGs",
+  factor    = 1,
+  nfeatures = 20,
+  scale     = TRUE,
+  abs       = FALSE
+) +
+  theme_minimal(base_size = 12) +
+  labs(title = "Panel D — Top 20 ISGs · Factor 1 (MOFA2)")
+
+png(paste0(ruta_fig, "PanelD_TopISGs_F1.png"), width = 2400, height = 1800, res = 300)
+plot_top_weights(MOFAobject_trained, view = "Transcriptomica_ISGs",
+                 factor = 1, nfeatures = 20, scale = TRUE)
+dev.off()
+```
+
+## Top proteínas séricas por factor
+
+```{r top_prot_f1, fig.cap="Panel E. Top proteínas séricas con mayor peso (loading) en el Factor 1 del modelo MOFA2.", fig.width=8, fig.height=5}
+plot_top_weights(
+  MOFAobject_trained,
+  view      = "Proteomica_serica",
+  factor    = 1,
+  nfeatures = length(prot_incluir),
+  scale     = TRUE,
+  abs       = FALSE
+) +
+  theme_minimal(base_size = 12) +
+  labs(title = "Panel E — Proteínas séricas · Factor 1 (MOFA2)")
+
+png(paste0(ruta_fig, "PanelE_TopProt_F1.png"), width = 2400, height = 1600, res = 300)
+plot_top_weights(MOFAobject_trained, view = "Proteomica_serica",
+                 factor = 1, nfeatures = length(prot_incluir), scale = TRUE)
+dev.off()
+```
+
+## Tabla de loadings — Factor 1
+
+```{r tabla_loadings}
+
+# ── Función de extracción de loadings ────────────────────────────────────────
+extraer_loadings_mofa <- function(modelo, vista, factor_num, n_top = 20) {
+  get_weights(modelo,
+              views         = vista,
+              factors       = factor_num,
+              abs           = FALSE,
+              as.data.frame = TRUE) %>%
+    mutate(feature = as.character(feature)) %>%
+    filter(value != 0) %>%
+    mutate(abs_loading = abs(value)) %>%
+    arrange(desc(abs_loading)) %>%
+    slice_head(n = n_top) %>%
+    mutate(
+      value       = round(value,       4),
+      abs_loading = round(abs_loading, 4),
+      direccion   = ifelse(value > 0, "↑ Positivo", "↓ Negativo")
+    ) %>%
+    select(feature, value, abs_loading, direccion)
+}
+
+# ── Etiquetas proteínas séricas ───────────────────────────────────────────────
+etiq_prot <- c(
+  IFNapgml = "IFN-α", IFNgpgml = "IFN-γ", IL2pgml = "IL-2",
+  IL6pgml = "IL-6", IL8pgml = "IL-8", baffpgml = "BAFF",
+  c3 = "C3", c4 = "C4", pcrmgl = "PCR (mg/L)",
+  creatinina = "Creatinina (mg/dL)", colesterol = "Colesterol total (mg/dL)",
+  trigli = "Triglicéridos (mg/dL)", hdl = "HDL (mg/dL)", ldl = "LDL (mg/dL)",
+  apoa1 = "Apo A-I (mg/dL)", apob = "Apo B (mg/dL)", apoba = "Cociente Apo B/A-I",
+  lipoprotein_a = "Lipoproteína(a) (mg/dL)", got = "GOT/AST (U/L)",
+  gpt = "GPT/ALT (U/L)", ggt = "GGT (U/L)", prot_tot = "Proteínas totales (g/dL)"
+)
+
+etiquetar_prot <- function(df) {
+  df %>% mutate(feature = dplyr::recode(feature, !!!etiq_prot, .default = feature))
+}
+
+# ── Tabla 4A: Top 20 ISGs — Factor 1 ─────────────────────────────────────────
+tab_isg_f1 <- extraer_loadings_mofa(MOFAobject_trained,
+                                     "Transcriptomica_ISGs", 1, n_top = 20)
+
+kable(tab_isg_f1,
+      caption   = "Tabla 4A. Top 20 ISGs con mayor peso en el Factor 1 (bloque transcriptómico).",
+      col.names = c("Gen ISG", "Loading", "Abs. Loading", "Dirección"),
+      align     = "lccc") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = FALSE, font_size = 13) %>%
+  footnote(general = "Loadings positivos: mayor expresión asociada al polo positivo del Factor 1. Loadings negativos: asociación inversa.",
+           general_title = "Nota")
+
+# ── Tabla 4B: Proteínas séricas — Factor 1 ───────────────────────────────────
+tab_prot_f1 <- extraer_loadings_mofa(MOFAobject_trained,
+                                      "Proteomica_serica", 1,
+                                      n_top = length(prot_incluir)) %>%
+  etiquetar_prot()
+
+kable(tab_prot_f1,
+      caption   = "Tabla 4B. Proteínas séricas con mayor peso en el Factor 1 (bloque proteómico).",
+      col.names = c("Proteína sérica", "Loading", "Abs. Loading", "Dirección"),
+      align     = "lccc") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = FALSE, font_size = 13) %>%
+  footnote(general = "Ordenadas por Abs. Loading descendente. Solo se muestran variables con loading ≠ 0.",
+           general_title = "Nota")
+```
+
+---
+
+# Bloque 5. Análisis de factores latentes
+
+## Extracción de scores
+
+```{r extraer_scores}
+factor_scores <- get_factors(MOFAobject_trained)$group1
+stopifnot(is.matrix(factor_scores))
+cat("✓ Dimensiones:", dim(factor_scores), "\n")
+cat("✓ Factores:", colnames(factor_scores), "\n")
+
+# Base alineada para todos los chunks del bloque 5
+muestras_comunes <- intersect(rownames(factor_scores), df_mofa$id2)
+fs_alin <- factor_scores[muestras_comunes, ]
+df_alin <- df_mofa %>%
+  filter(id2 %in% muestras_comunes) %>%
+  arrange(match(id2, muestras_comunes))
+
+cat("✓ Muestras alineadas:", length(muestras_comunes), "\n")
+```
+
+## Panel A — Scores MOFA2 por estado de remisión DORIS
+
+El estado de remisión DORIS es una variable **completamente externa** al modelo MOFA2: no formó parte de ninguno de los dos bloques de entrada (transcriptómico ni proteómico). Su uso como variable de anotación permite una validación clínica independiente de los factores latentes.
+
+```{r panel_doris, fig.cap="Panel A. Distribución de los scores de los factores latentes MOFA2 según el estado de remisión DORIS (variable externa al modelo). Los violines representan la densidad de distribución; los puntos muestran observaciones individuales.", fig.width=10, fig.height=5}
+col_doris <- c("No" = "#4575b4", "Sí" = "#d73027")
+
+p_doris <- plot_factor(
+  MOFAobject_trained,
+  factors      = factores_activos,
+  color_by     = "doris",
+  dot_size     = 1.5,
+  dodge        = TRUE,
+  legend       = TRUE,
+  add_violin   = TRUE,
+  violin_alpha = 0.3
+) +
+  scale_color_manual(values = col_doris, name = "Remisión DORIS") +
+  scale_fill_manual(values  = col_doris, name = "Remisión DORIS") +
+  theme_minimal(base_size = 12) +
+  labs(
+    title    = "Panel A — Scores MOFA2 por estado de remisión DORIS",
+    subtitle = "Variable externa al modelo (no usada como input en MOFA2)"
+  )
+
+print(p_doris)
+ggsave(paste0(ruta_fig, "PanelA_FactoresDORIS.png"),
+       plot = p_doris, width = 10, height = 5, dpi = 300, bg = "white")
+```
+
+## Panel B — Scores MOFA2 por estado LLDAS
+
+```{r panel_lldas, fig.cap="Panel B. Distribución de los scores de los factores latentes MOFA2 según el estado LLDAS (variable externa al modelo).", fig.width=10, fig.height=5}
+col_lldas <- c("No" = "#4575b4", "Sí" = "#d73027")
+
+p_lldas <- plot_factor(
+  MOFAobject_trained,
+  factors      = factores_activos,
+  color_by     = "lldas",
+  dot_size     = 1.5,
+  dodge        = TRUE,
+  legend       = TRUE,
+  add_violin   = TRUE,
+  violin_alpha = 0.3
+) +
+  scale_color_manual(values = col_lldas, name = "Estado LLDAS") +
+  scale_fill_manual(values  = col_lldas, name = "Estado LLDAS") +
+  theme_minimal(base_size = 12) +
+  labs(
+    title    = "Panel B — Scores MOFA2 por estado LLDAS",
+    subtitle = "Variable externa al modelo (no usada como input en MOFA2)"
+  )
+
+print(p_lldas)
+ggsave(paste0(ruta_fig, "PanelB_FactoresLLDAS.png"),
+       plot = p_lldas, width = 10, height = 5, dpi = 300, bg = "white")
+```
+
+## Panel C — Scores MOFA2 coloreados por SLEDAI-2K continuo
+
+```{r panel_sledai, fig.cap="Panel C. Scores de los factores latentes MOFA2 coloreados por el valor continuo del SLEDAI-2K. Variable externa al modelo.", fig.width=10, fig.height=5}
+p_sledai <- plot_factor(
+  MOFAobject_trained,
+  factors  = factores_activos,
+  color_by = "sledai_cat",
+  dot_size = 1.5
+) +
+  scale_color_distiller(palette = "YlOrRd", direction = 1,
+                        name = "SLEDAI-2K") +
+  theme_minimal(base_size = 12) +
+  labs(
+    title    = "Panel C — Scores MOFA2 coloreados por SLEDAI-2K",
+    subtitle = "Variable externa al modelo"
+  )
+
+print(p_sledai)
+ggsave(paste0(ruta_fig, "PanelC_FactoresSLEDAI.png"),
+       plot = p_sledai, width = 10, height = 5, dpi = 300, bg = "white")
+```
+
+## Panel D — Scores MOFA2 coloreados por SLE-DAS continuo
+
+```{r panel_sledas, fig.cap="Panel D. Scores de los factores latentes MOFA2 coloreados por el valor continuo del SLE-DAS. Variable externa al modelo.", fig.width=10, fig.height=5}
+p_sledas <- plot_factor(
+  MOFAobject_trained,
+  factors  = factores_activos,
+  color_by = "sledas_cat",
+  dot_size = 1.5
+) +
+  scale_color_distiller(palette = "YlOrRd", direction = 1,
+                        name = "SLE-DAS") +
+  theme_minimal(base_size = 12) +
+  labs(
+    title    = "Panel D — Scores MOFA2 coloreados por SLE-DAS",
+    subtitle = "Variable externa al modelo"
+  )
+
+print(p_sledas)
+ggsave(paste0(ruta_fig, "PanelD_FactoresSLEDAS.png"),
+       plot = p_sledas, width = 10, height = 5, dpi = 300, bg = "white")
+```
+
+## Tabla de correlaciones Spearman — Factores × Covariables clínicas
+
+```{r tabla_corr_clin}
+clin_cont <- list(
+  list(var = "sledai", etiq = "SLEDAI-2K"),
+  list(var = "sledas", etiq = "SLE-DAS"),
+  list(var = "slicc",  etiq = "SLICC-SDI")
+)
+
+corr_tabla <- purrr::map_dfr(clin_cont, function(cv) {
+  y <- df_alin[[cv$var]]
+  purrr::map_dfr(colnames(fs_alin), function(fac) {
+    x   <- fs_alin[, fac]
+    idx <- complete.cases(x, y)
+    ct  <- cor.test(x[idx], y[idx], method = "spearman",
+                    exact = FALSE)
+    tibble(
+      Covariable = cv$etiq,
+      Factor     = fac,
+      rho        = round(ct$estimate, 3),
+      p_valor    = round(ct$p.value,  4)
+    )
+  })
+}) %>%
+  mutate(
+    p_adj = round(p.adjust(p_valor, method = "BH"), 4),
+    Sig   = case_when(
+      p_adj < 0.001 ~ "***",
+      p_adj < 0.01  ~ "**",
+      p_adj < 0.05  ~ "*",
+      TRUE          ~ "ns"
+    )
+  )
+
+kable(corr_tabla,
+      caption   = "Tabla 5. Correlaciones de Spearman entre los factores latentes MOFA2 y las covariables clínicas continuas (corrección FDR de Benjamini-Hochberg).",
+      col.names = c("Covariable", "Factor", "ρ Spearman", "p", "p adj (BH)", "Sig."),
+      align     = "llcccc") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = FALSE, font_size = 13) %>%
+  footnote(
+    general = "ρ: coeficiente de Spearman. p adj: p-valor ajustado por FDR (Benjamini-Hochberg). *** p < 0,001; ** p < 0,01; * p < 0,05; ns: no significativo. Todas las covariables son externas al modelo MOFA2.",
+    general_title = "Nota"
+  )
+```
+
+## Tabla de Wilcoxon — Factores × Variables binarias de remisión
+
+```{r wilcoxon_factores}
+scores_clin <- tibble(
+  id2 = rownames(fs_alin),
+  F1  = fs_alin[, "Factor1"],
+  F2  = fs_alin[, "Factor2"],
+  F3  = fs_alin[, "Factor3"],
+  F4  = fs_alin[, "Factor4"]
+) %>%
+  left_join(df_mofa %>% select(id2, lldas, doris), by = "id2") %>%
+  mutate(
+    lldas_num = as.integer(lldas) - 1L,   # "No"→0, "Sí"→1
+    doris_num = as.integer(doris) - 1L
+  )
+
+resultados_wilcox <- purrr::map_dfr(c("F1", "F2", "F3", "F4"), function(fac) {
+  purrr::map_dfr(list(
+    list(var = "lldas_num", etiq = "LLDAS"),
+    list(var = "doris_num", etiq = "DORIS")
+  ), function(v) {
+    datos <- scores_clin %>% filter(!is.na(.data[[v$var]]))
+    g0 <- datos[[fac]][datos[[v$var]] == 0]
+    g1 <- datos[[fac]][datos[[v$var]] == 1]
+    wt <- wilcox.test(g0, g1)
+    tibble(
+      Factor   = fac,
+      Variable = v$etiq,
+      n_No     = length(g0),
+      n_Si     = length(g1),
+      W        = round(wt$statistic, 1),
+      p_valor  = round(wt$p.value, 4)
+    )
+  })
+}) %>%
+  mutate(
+    p_adj = round(p.adjust(p_valor, method = "BH"), 4),
+    Sig   = case_when(
+      p_adj < 0.001 ~ "***",
+      p_adj < 0.01  ~ "**",
+      p_adj < 0.05  ~ "*",
+      TRUE          ~ "ns"
+    )
+  )
+
+kable(resultados_wilcox,
+      caption   = "Tabla 6. Test de Wilcoxon-Mann-Whitney entre los scores de los factores latentes MOFA2 y las variables binarias de remisión clínica (LLDAS y DORIS).",
+      col.names = c("Factor", "Variable", "n No", "n Sí", "W",
+                    "p", "p adj (BH)", "Sig."),
+      align     = "llcccccc") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = FALSE, font_size = 13) %>%
+  footnote(
+    general = "Test de Wilcoxon-Mann-Whitney bilateral. n No: no cumple criterios de remisión; n Sí: cumple criterios. p adj: FDR Benjamini-Hochberg. *** p<0,001; ** p<0,01; * p<0,05; ns: no significativo. LLDAS y DORIS son variables externas al modelo MOFA2.",
+    general_title = "Nota"
+  )
+```
+

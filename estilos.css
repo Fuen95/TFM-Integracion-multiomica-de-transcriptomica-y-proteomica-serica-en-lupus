@@ -1,0 +1,28 @@
+/* Tamaño general del texto */
+body {
+  font-size: 12px;
+}
+
+/* Párrafos justificados */
+p {
+  text-align: justify;
+}
+
+/* Código en línea (`texto`) */
+code {
+  font-size: 0.9em;   /* algo más pequeño que el cuerpo */
+}
+
+/* Bloques de código (chunks) */
+pre code {
+  font-size: 0.85em;  /* reduce más si lo necesitas (0.8em, 0.75em) */
+}
+
+/* Salida de knitr (mensajes, tablas en texto, etc.) */
+pre {
+  font-size: 0.85em;
+}
+/* Opcional: ajustar tamaño de títulos */
+h1 { font-size: 26px; }
+h2 { font-size: 22px; }
+h3 { font-size: 18px; }
