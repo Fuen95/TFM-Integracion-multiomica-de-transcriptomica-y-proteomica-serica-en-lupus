@@ -20,7 +20,7 @@ Analizar la relación entre perfiles moleculares y actividad clínica mediante e
 
 - `data/`: archivos de datos utilizados como entrada del análisis.  
 - `scripts/`: informes y análisis en formato `.Rmd`.  
-- `results/`: resultados exportados; incluye informes HTML y, en el futuro, memoria y presentación en PDF.  
+- `results/`: resultados exportados; incluye informes HTML, memoria y presentación en PDF.  
 - `styles/`: archivos auxiliares de formato, como `apa.csl` y `estilos.css`.
 
 ## Reproducibilidad
