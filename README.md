@@ -10,15 +10,13 @@ Analizar la relación entre perfiles moleculares y actividad clínica mediante e
 
 ```text
 .
-├── data/        # Datos de entrada
 ├── scripts/     # Scripts de análisis en R Markdown
 ├── results/     # Resultados generados (HTML, PDF, etc.)
 └── styles/      # Archivos de estilo y formato
 ```
 
 ## Contenido
-
-- `data/`: archivos de datos utilizados como entrada del análisis.  
+.  
 - `scripts/`: informes y análisis en formato `.Rmd`.  
 - `results/`: resultados exportados; incluye informes HTML, memoria y presentación en PDF.  
 - `styles/`: archivos auxiliares de formato, como `apa.csl` y `estilos.css`.
@@ -29,4 +27,4 @@ El repositorio está organizado para separar datos, código y resultados, siguie
 
 ## Consideraciones sobre los datos
 
-Los datos clínicos y ómicos pueden estar sujetos a restricciones éticas y de confidencialidad. Por ello, este repositorio puede no incluir todos los datos originales y prioriza la documentación del flujo de análisis y de los resultados derivados.
+Los datos clínicos originales no se incluyen en este repositorio por motivos de confidencialidad y protección de datos. Únicamente se comparten scripts, informes y material derivado; la estructura de los datos y el proceso de análisis se detallan en la memoria del TFM.
